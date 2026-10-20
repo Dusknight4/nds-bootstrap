@@ -80,18 +80,19 @@ size_t ini::refresh() {
           (m_ini_key_t){index, line.substr(0, line.find('=')),
                         line.substr(line.find('=') + 1, line.size())});
 
-      // Remove leading and trailing whitespace
+      // Remove leading and trailing whitespace (bounded: an all-blank name or
+      // value, as in "KEY =", used to run off the front of the string)
       int start = 0, end = m_keys.back().name.size() - 1;
-      while(m_keys.back().name[start] == ' ')
+      while(start <= end && m_keys.back().name[start] == ' ')
         start++;
-      while(m_keys.back().name[end] == ' ')
+      while(end >= start && m_keys.back().name[end] == ' ')
         end--;
       m_keys.back().name = m_keys.back().name.substr(start, end + 1 - start);
 
       start = 0, end = m_keys.back().data.size() - 1;
-      while(m_keys.back().data[start] == ' ')
+      while(start <= end && m_keys.back().data[start] == ' ')
         start++;
-      while(m_keys.back().data[end] == ' ')
+      while(end >= start && m_keys.back().data[end] == ' ')
         end--;
       m_keys.back().data = m_keys.back().data.substr(start, end + 1 - start);
     }

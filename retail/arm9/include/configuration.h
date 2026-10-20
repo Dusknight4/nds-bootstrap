@@ -75,6 +75,11 @@ typedef struct configuration {
 	u8 romRead_LED;
 	u8 dmaRomRead_LED;
 	u8 remappedKeys[12];
+	// WideMelon WiFi bridge (sd:/_nds/nds-bootstrap-wifi.ini): what the wireless is for
+	// this time. 0: the game's own local wireless, with nearby DSes, as normal.
+	// 1: local wireless carried over the WiFi network, to WideMelon.
+	u8 wifiBridge;
+	char* wifiPc;		// the PC running WideMelon: an IP address, or "auto" to find it
 	int asyncCardRead;
 	bool cardReadDMA;
 	bool boostCpu;

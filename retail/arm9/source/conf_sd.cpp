@@ -31,6 +31,7 @@
 #include "nitrofs.h"
 #include "igm_text.h"
 #include "locations.h"
+#include "nbw_blob.h"
 #include "version.h"
 
 #include "nandio.h"
@@ -340,6 +341,72 @@ static void loadColorLut(const bool isRunFromFlashcard, const bool phatColors) {
 				powerOff(PM_BACKLIGHT_BOTTOM);
 			}
 		}
+	}
+}
+
+// The two-option menu shown when X is held as the game starts. Returns the
+// choice (0 Regular Local, 1 Local as WiFi), starting on the current one.
+static u8 wifi_mode_menu(u8 current) {
+	consoleDemoInit();	// text on the bottom screen, for the menu only
+	u8 choice = current;
+	// (shown at once: X needn't be let go first, it isn't one of the menu's keys)
+	scanKeys();
+	for (;;) {
+		consoleClear();
+		iprintf("\n  Local wireless\n\n");
+		// (the arrow starts on the saved mode, marked "current")
+		iprintf(" %c Local as WiFi%s\n", choice == 1 ? '>' : ' ', current == 1 ? "  (current)" : "");
+		iprintf("     with WideMelon, over the\n     console's WiFi\n\n");
+		iprintf(" %c Regular Local%s\n", choice == 0 ? '>' : ' ', current == 0 ? "  (current)" : "");
+		iprintf("     with DS systems nearby\n\n");
+		iprintf("  Up/Down, A: choose\n  (kept for next time)\n");
+		u16 down = 0;
+		while (!down) {
+			swiWaitForVBlank();
+			scanKeys();
+			down = keysDown();
+		}
+		if (down & (KEY_UP | KEY_DOWN)) choice = !choice;
+		if (down & KEY_A) break;
+	}
+	// leave the screen as it was found
+	consoleClear();
+	videoSetModeSub(0);
+	vramSetBankC(VRAM_C_LCD);
+	return choice;
+}
+
+// WideMelon WiFi bridge setting, in a file of its own, as TWiLight Menu++
+// writes nds-bootstrap.ini afresh for every game:
+//   [WIFI]
+//   BRIDGE = 0          ; 0 Regular Local (the game's own wireless), 1 Local as WiFi
+//   PC = auto           ; or the IP address of the PC running WideMelon
+// The network comes from the console's own saved WiFi (on a 3DS, the 3DS's
+// connections), read by the WiFi driver itself: nothing to set up here.
+// Holding X while the game starts brings up a menu to pick the mode, which is
+// kept as the new default, so quick start stays one press.
+static void load_wifi_conf(configuration* conf, const char* fn) {
+	easysave::ini wifi_file(fn);
+	conf->wifiBridge = (strtol(wifi_file.fetch("WIFI", "BRIDGE", "0").c_str(), NULL, 0) != 0);
+	conf->wifiPc = strdup(wifi_file.fetch("WIFI", "PC", "auto").c_str());
+
+	// X and Y reach the ARM9 from the ARM7 once a frame: let a frame go by first
+	swiWaitForVBlank();
+	swiWaitForVBlank();
+	scanKeys();
+	if (keysHeld() & KEY_X) {
+		const u8 choice = wifi_mode_menu(conf->wifiBridge);
+		if (choice != conf->wifiBridge) {
+			conf->wifiBridge = choice;
+			// a fresh copy: fetch() above added every missing key, empty, to wifi_file
+			easysave::ini save_file(fn);
+			save_file.set("WIFI", "BRIDGE", choice ? "1" : "0");
+			save_file.flush();
+		}
+	}
+	// only the DSi's WiFi (DSi mode) can join a network
+	if (conf->wifiBridge && !dsiFeatures()) {
+		conf->wifiBridge = 0;
 	}
 }
 
@@ -842,6 +909,7 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 	conf->bootstrapOnFlashcard = ((bootstrapPath[0] == 'f' && bootstrapPath[1] == 'a' && bootstrapPath[2] == 't') || !conf->sdFound);
 
 	load_conf(conf, conf->bootstrapOnFlashcard ? "fat:/_nds/nds-bootstrap.ini" : "sd:/_nds/nds-bootstrap.ini");
+	load_wifi_conf(conf, conf->bootstrapOnFlashcard ? "fat:/_nds/nds-bootstrap-wifi.ini" : "sd:/_nds/nds-bootstrap-wifi.ini");
 
 	conf->initDisc = (REG_SCFG_EXT == 0);
 
@@ -1643,6 +1711,18 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 						tonccpy(returnLoc+2, conf->quitPath, strlen(conf->quitPath));
 						tonccpy(returnLoc, sdmcText, 4);
 					}
+				}
+
+				// WideMelon WiFi bridge: the WiFi driver, for the loader to start and the
+				// ce7 to run each frame. DS games only: DSi games use its RAM for the cache
+				if (conf->wifiBridge && unitCode == 0) {
+					FILE* blobFile = fopen("nitro:/nbwifi_blob.bin", "rb");
+					if (blobFile && fread((u8*)NBW_BLOB_LOCATION, 1, NBW_BLOB_SIZE, blobFile) > 0
+					 && ((NbwBlob*)NBW_BLOB_LOCATION)->magic == NBW_BLOB_MAGIC) {
+						DC_FlushRange((u8*)NBW_BLOB_LOCATION, NBW_BLOB_SIZE);
+						conf->valueBits4 |= BIT(2); // wifiBridge
+					}
+					if (blobFile) fclose(blobFile);
 				}
 
 				const bool gsdd = (memcmp(romTid, "BO5", 3) == 0);

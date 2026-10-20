@@ -72,6 +72,7 @@
 #include "igm_text.h"
 #include "locations.h"
 #include "value_bits.h"
+#include "nbw_blob.h"
 #include "loading_screen.h"
 #include "unpatched_funcs.h"
 #include "nocashMessage.h"
@@ -145,6 +146,7 @@ int twlCfgLang = 0;
 int sharedFontRegion = 0;
 u8 wifiLedState = 0;
 bool i2cBricked = false;
+bool nbwBridgeOnline = false;	// WideMelon WiFi bridge: driver ready (hook_arm7 tells the ce7 to run it)
 
 u32 aesKey1[4] = {0};
 u32 aesKey2[4] = {0};
@@ -852,10 +854,48 @@ u32 getRomLocation(const tNDSHeader* ndsHeader, const bool isESdk2, const bool i
 	return getRomPartLocation(ndsHeader, isESdk2, isSdk5, dsiBios);
 }
 
+// WideMelon WiFi bridge: brings the DSi's WiFi up and joins whichever of the
+// console's saved networks is in range (on a 3DS, the 3DS's own), before the
+// game starts: about 2 seconds (the address can come in game, where the ce7
+// runs the driver). Up to 20 seconds; if it can't, the game runs as normal.
+// (Shelved: joining only when the game starts its wireless. See the notes.)
+static void nbwBridgePrepare(void) {
+	NbwBlob* blob = (NbwBlob*)NBW_BLOB_LOCATION;
+	if (blob->magic != NBW_BLOB_MAGIC || blob->version != NBW_BLOB_VERSION) {
+		dbg_printf("WiFi bridge: no driver\n");
+		return;
+	}
+	if (!blob->prepare()) {
+		dbg_printf("WiFi bridge: no saved network it can use, or WiFi didn't start\n");
+		return;
+	}
+	u16 lastVcount = REG_VCOUNT;
+	for (u32 frames = 0; frames < 20 * 60; ) {
+		blob->poll();
+		const int state = blob->state();
+		if (state == NbwBlobOnline || state == NbwBlobGettingIp) {
+			dbg_printf("WiFi bridge: joined\n");
+			nbwBridgeOnline = true;
+			return;
+		}
+		if (state == NbwBlobFailed) break;
+		const u16 vcount = REG_VCOUNT;
+		if (vcount < lastVcount) frames++;
+		lastVcount = vcount;
+	}
+	dbg_printf("WiFi bridge: couldn't join a network\n");
+	*(vu16*)0x4004C04 |= BIT(8);	// the DS-compatible radio back, for the game's own wireless
+}
+
 bool romLocationAdjust(const tNDSHeader* ndsHeader, const bool laterSdk, const bool isSdk5, u32* romLocation, const u16 blockSize) {
 	const bool ntrType = (ndsHeader->unitCode == 0);
 	const bool cluster32KB = (blockSize == 0x8000);
 	const u32 romLocationOld = *romLocation;
+	// WideMelon WiFi bridge: the WiFi driver's RAM (nbw_blob.h) stays out of the ROM cache
+	const u32 nbwStart = 0x0C000000 | (NBW_BLOB_LOCATION & 0x00FFFFFF);
+	if (wifiBridge && *romLocation + blockSize > nbwStart && *romLocation < nbwStart + NBW_BLOB_SIZE) {
+		*romLocation = nbwStart + NBW_BLOB_SIZE;
+	}
 	if (*romLocation == 0x0C3FC000) {
 		*romLocation += pkmnGen5 ? 0x4020 : 0x4000;
 	} else if (*romLocation == 0x0C7C0000 && !laterSdk) {
@@ -1833,7 +1873,14 @@ int arm7_main(void) {
 	} else {
 		toncset((u32*)0x02400000, 0, 0x2000);
 		dma_twlFill32(0, 0, (u32*)0x02500000, 0x100000);	// clear part of EWRAM - except before in-game menu data
-		memset_addrs_arm7(0x02F00000, 0x02F80000);
+		if (wifiBridge) {
+			// all but the WiFi driver, which the ARM9 put there
+			memset_addrs_arm7(0x02F00000, NBW_BLOB_LOCATION);
+			memset_addrs_arm7(NBW_BLOB_LOCATION + NBW_BLOB_SIZE, 0x02F80000);
+			nbwBridgePrepare();
+		} else {
+			memset_addrs_arm7(0x02F00000, 0x02F80000);
+		}
 		memset_addrs_arm7(0x02FFE000, 0x02FFF000); // clear DSi header
 
 		extern u32* lastClusterCacheUsed;
@@ -2239,8 +2286,8 @@ int arm7_main(void) {
 		if (!twlTouch || !dsiModeConfirmed || !ROMsupportsDsiMode(&dsiHeaderTemp.ndshdr) || (ROMsupportsDsiMode(&dsiHeaderTemp.ndshdr) && !(*(u8*)0x02FFE1BF & BIT(0)))) {
 			NDSTouchscreenMode();
 			*(vu16*)0x4000500 = 0x807F;
-			if (!dsiModeConfirmed || !ROMsupportsDsiMode(&dsiHeaderTemp.ndshdr)) {
-				REG_GPIO_WIFI |= BIT(8);	// Old NDS-Wifi mode
+			if ((!dsiModeConfirmed || !ROMsupportsDsiMode(&dsiHeaderTemp.ndshdr)) && !nbwBridgeOnline) {
+				REG_GPIO_WIFI |= BIT(8);	// Old NDS-Wifi mode (not with the WiFi bridge: its driver has the DSi's WiFi up already)
 			}
 		}
 		if (macroMode) {

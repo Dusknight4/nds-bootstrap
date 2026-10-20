@@ -34,6 +34,7 @@
 #include "hook.h"
 #include "tonccpy.h"
 #include "nocashMessage.h"
+#include "nbw_blob.h"
 
 #define b_gameOnFlashcard BIT(0)
 #define b_saveOnFlashcard BIT(1)
@@ -61,6 +62,7 @@
 #define b_clearRamOnReset BIT(23)
 #define b_saveRelocation BIT(24)
 #define b_asyncCardReadMinimal BIT(25)
+#define b_wifiBridge BIT(26) // WideMelon WiFi bridge online: the ce7 runs the nbwifi blob each frame
 #define b_i2cBricked BIT(30)
 #define b_scfgLocked BIT(31)
 
@@ -460,6 +462,12 @@ int hookNdsRetailArm7(
 	if (REG_SCFG_EXT == 0) {
 		ce7->valueBits |= b_scfgLocked;
 	}
+	extern bool nbwBridgeOnline;
+	if (nbwBridgeOnline) {
+		ce7->valueBits |= b_wifiBridge;
+		// the game's ARM7 IRQ table, for the driver's own mid-frame (VCount) handler
+		((NbwBlob*)NBW_BLOB_LOCATION)->irqTable = (u32)hookLocation;
+	}
 	ce7->mainScreen               = mainScreen;
 	ce7->language                 = language;
 	if (strcmp(romTid, "AKYP") == 0) { // Etrian Odyssey (EUR)
@@ -518,6 +526,11 @@ int hookNdsRetailArm7(
 	}
 
 	*vblankHandler = ce7->patches->vblankHandler;
+	if (nbwBridgeOnline) {
+		// WideMelon WiFi bridge: how the driver finds this table once the game has moved it
+		((NbwBlob*)NBW_BLOB_LOCATION)->irqVblank = ce7->patches->vblankHandler;
+		((NbwBlob*)NBW_BLOB_LOCATION)->irqIpcSync = ce7->patches->fifoHandler;
+	}
 	if (ce7->patches->fifoHandler) {
 	*ipcSyncHandler = ce7->patches->fifoHandler;
 	/*if ((strncmp(romTid, "UOR", 3) == 0)

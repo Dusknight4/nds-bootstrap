@@ -43,6 +43,7 @@
 #include "fpsAdjust.h"
 #include "nds_header.h"
 #include "igm_text.h"
+#include "nbw_blob.h"
 
 #ifndef TWLSDK
 // Patcher
@@ -80,6 +81,7 @@
 #define isDlp BIT(21)
 #define useColorLut BIT(22)
 #define clearRamOnReset BIT(23)
+#define wifiBridgeOnline BIT(26) // WideMelon WiFi bridge (bootloaderi hook_arm7.c: b_wifiBridge)
 #define i2cBricked BIT(30)
 #define scfgLocked BIT(31)
 
@@ -1829,6 +1831,14 @@ void myIrqHandlerVBlank(void) {
 	if (valueBits & i2cBricked) {
 		REG_MASTER_VOLUME = noI2CVolLevel;
 	}
+
+	#ifndef TWLSDK
+	if (valueBits & wifiBridgeOnline) {
+		// WideMelon WiFi bridge: the WiFi driver's turn (nbw_blob.h), on a stack of its own
+		NbwBlob* nbwBlob = (NbwBlob*)NBW_BLOB_LOCATION;
+		nbwBlob->frame();
+	}
+	#endif
 
 	#ifdef DEBUG
 	nocashMessage("cheat_engine_start\n");
