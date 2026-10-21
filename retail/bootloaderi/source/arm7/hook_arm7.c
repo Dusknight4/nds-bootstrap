@@ -378,6 +378,12 @@ int hookNdsRetailArm7(
 	ce7->ramDumpCluster           = ramDumpCluster;
 	ce7->screenshotCluster        = screenshotCluster;
 	ce7->pageFileCluster          = pageFileCluster;
+	extern u32 saveMirrorCluster;
+	if (saveMirrorCluster) {
+		ce7->saveMirrorCluster    = saveMirrorCluster;	// R4 save copy
+		extern void r4LoaderNoteHook(void);
+		r4LoaderNoteHook();
+	}
 	ce7->manualCluster            = manualCluster;
 	if (gameOnFlashcard) {
 		ce7->valueBits |= b_gameOnFlashcard;

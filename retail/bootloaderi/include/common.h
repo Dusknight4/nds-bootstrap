@@ -62,6 +62,7 @@
 #define ARM9_DISPESRB 10
 #define ARM9_WRAMONARM7 11
 #define ARM9_WRAMONARM9 12
+#define ARM9_R4RELEASE 13	// R4 save copy: release the card's reset on the ARM9's side too (main.arm7.c r4Restart)
 //};
 
 extern u32* arm9executeAddress;

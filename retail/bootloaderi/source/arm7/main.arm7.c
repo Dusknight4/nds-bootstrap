@@ -73,6 +73,8 @@
 #include "locations.h"
 #include "value_bits.h"
 #include "nbw_blob.h"
+#include "ntrinit.h"
+#include "r4card.h"
 #include "loading_screen.h"
 #include "unpatched_funcs.h"
 #include "nocashMessage.h"
@@ -99,6 +101,54 @@ extern u8 saveRelocation;
 extern u16 a9ScfgRom;
 extern u8 dsiSD;
 extern u32 saveFileCluster;
+extern u32 saveMirrorCluster;	// R4 save copy: the save on the flashcard too (arm9 r4save.cpp)
+extern u32 saveMirrorLogCluster;
+
+// R4 save copy: the loader's notes, in the last KB of r4save.log (arm9 r4save.cpp keeps it for them)
+static void r4LoaderNote(const char* text) {
+	static u32 pos = 0xC00;
+	if (!saveMirrorLogCluster) return;
+	u32 len = 0;
+	while (text[len]) len++;
+	if (pos + len > 0xFFF) return;
+	aFile logFile;
+	getFileFromCluster(&logFile, saveMirrorLogCluster, false);
+	fileWrite(text, &logFile, pos, len);
+	pos += len;
+}
+
+void r4LoaderNoteHook(void) {	// hook_arm7.c: the card engine got the R4 file
+	r4LoaderNote("loader: card engine set up for the R4 copy\n");
+}
+
+// label, then the words in hex
+static void r4LoaderNoteWords(const char* label, const u32* words, int count) {
+	char line[160];
+	int n = 0;
+	while (label[n] && n < 64) {
+		line[n] = label[n];
+		n++;
+	}
+	for (int i = 0; i < count; i++) {
+		for (int k = 7; k >= 0; k--) {
+			const u32 d = (words[i] >> (k * 4)) & 0xF;
+			line[n++] = d < 10 ? '0' + d : 'A' + d - 10;
+		}
+		line[n++] = (i + 1 < count) ? ' ' : '\n';
+	}
+	line[n] = 0;
+	r4LoaderNote(line);
+}
+
+// The R4 driver's record of its first failure (dstt_sd.c: 6 words at offset 84h), and the slot now
+static void r4LoaderNoteDiag(void) {
+	extern u32 __myio_dldi;	// my_dldi.s: the driver's interface, at offset 60h of its header
+	const u32* diag = (const u32*)((u8*)&__myio_dldi - 0x60 + 0x84);
+	u32 words[7];
+	for (int i = 0; i < 6; i++) words[i] = diag[i];
+	words[6] = ((u32)REG_SCFG_MC << 16) | *(vu16*)0x04000204;
+	r4LoaderNoteWords("loader: driver ", words, 7);
+}
 extern u32 gbaFileCluster;
 extern u32 gbaSaveFileCluster;
 extern u32 romSize;
@@ -1655,8 +1705,40 @@ bool buttonsRemapped(void) {
 	return false;
 }
 
+// R4 save copy: the R4's status (50h; 0: in its SD mode, DEADDEAD: no answer)
+static u32 r4Status(void) {
+	u32 status = 0xDEADDEAD;
+	dsttStatus(&status);
+	return status;
+}
+
+// R4 save copy: starts the R4 again as the launcher does (arm9 r4save.cpp), for when it has
+// left its SD mode by the time the loader needs it. The Blowfish table is still at
+// BLOWFISH_LOCATION (decompress.c clears it only after the secure area).
+static bool r4Restart(void) {
+	static NtrInitInfo info;
+	bool started = false;
+	for (int attempt = 0; attempt < 2 && !started; attempt++) {
+		my_disableSlot1();
+		ntrDelayMs(100);
+		my_enableSlot1();
+		ntrDelayMs(100);
+		// both CPUs' ROMCTRL must release the card's reset, before it is started (see r4save.cpp)
+		while (arm9_stateFlag != ARM9_READY);
+		arm9_stateFlag = ARM9_R4RELEASE;
+		while (arm9_stateFlag != ARM9_READY);
+		started = ntrInit((const u32*)BLOWFISH_LOCATION, 0x2468ACE1 ^ ((u32)REG_VCOUNT << 16), attempt ? NTRINIT_F_SECURE : 0, &info);
+	}
+	if (!started) return false;
+	u32 resp;
+	DsttInfo di;
+	return dsttEnterSd(true, &resp) && dsttSdInit(&di);
+}
+
 int arm7_main(void) {
 	nocashMessage("bootloader");
+
+	const u32 r4AtStart = saveMirrorCluster ? r4Status() : 0;	// R4 save copy: for the log below
 
 	initMBK();
 
@@ -1678,12 +1760,30 @@ int arm7_main(void) {
 		}
 	}
 
-	if (gameOnFlashcard || saveOnFlashcard) {
+	if (saveMirrorCluster) {
+		// R4 save copy: is the R4 still in its SD mode, as the launcher left it? If not, start it again
+		const u32 checks[3] = { *(vu32*)R4_CHECK_LOCATION, r4AtStart, r4Status() };
+		r4LoaderNoteWords("loader: R4 50h at hand-over, loader start, now: ", checks, 3);
+		if (checks[2] != 0) {
+			r4LoaderNote(r4Restart() ? "loader: R4 started again: OK\n" : "loader: R4 start again FAILED\n");
+		}
+	}
+
+	if (gameOnFlashcard || saveOnFlashcard || saveMirrorCluster) {
 		// Init Slot-1 card
 		if (!FAT_InitFiles(initDisc, true)) {
 			nocashMessage("!FAT_InitFiles");
-			errorOutput();
+			if (gameOnFlashcard || saveOnFlashcard) {
+				errorOutput();
+			}
 			//return -1;
+			if (saveMirrorCluster) {
+				r4LoaderNote("loader: R4 card read FAILED, R4 copy off\n");
+				r4LoaderNoteDiag();
+				saveMirrorCluster = 0;	// the game still starts, on the SD save alone
+			}
+		} else if (saveMirrorCluster) {
+			r4LoaderNote("loader: R4 card read OK\n");
 		}
 	}
 
@@ -2264,7 +2364,7 @@ int arm7_main(void) {
 			}
 		}*/
 
-		if (!bootstrapOnFlashcard && !gameOnFlashcard && !saveOnFlashcard && REG_SCFG_EXT != 0 && !(REG_SCFG_MC & BIT(0))) {
+		if (!bootstrapOnFlashcard && !gameOnFlashcard && !saveOnFlashcard && !saveMirrorCluster && REG_SCFG_EXT != 0 && !(REG_SCFG_MC & BIT(0))) {
 			if (specialCard || saveRelocation == FALSE) {
 				// Enable Slot-1 for games that use IR
 				my_enableSlot1();
@@ -2346,8 +2446,16 @@ int arm7_main(void) {
 		}
 
 		tonccpy((u32*)ce7Location, (u32*)CARDENGINEI_ARM7_BUFFERED_LOCATION, ce7Size);
-		if (gameOnFlashcard || saveOnFlashcard) {
-			if (!dldiPatchBinary((data_t*)ce7Location, ce7Size-0x400, (data_t*)((ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) ? 0 : (dsiEnhancedMbk ? CARDENGINEI_ARM7_LOCATION_ALT_DLDI : CARDENGINEI_ARM7_LOCATION_DLDI)))) {
+		if (gameOnFlashcard || saveOnFlashcard || saveMirrorCluster) {
+			if (!gameOnFlashcard && !saveOnFlashcard) {
+				// R4 save copy only: without the driver in the card engine the copy is off, the game still starts
+				if (dldiPatchBinary((data_t*)ce7Location, ce7Size-0x400, (data_t*)((ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) ? 0 : (dsiEnhancedMbk ? CARDENGINEI_ARM7_LOCATION_ALT_DLDI : CARDENGINEI_ARM7_LOCATION_DLDI)))) {
+					r4LoaderNote("loader: R4 driver in the card engine OK\n");
+				} else {
+					r4LoaderNote("loader: R4 driver patch FAILED, R4 copy off\n");
+					saveMirrorCluster = 0;
+				}
+			} else if (!dldiPatchBinary((data_t*)ce7Location, ce7Size-0x400, (data_t*)((ROMsupportsDsiMode(ndsHeader) && dsiModeConfirmed) ? 0 : (dsiEnhancedMbk ? CARDENGINEI_ARM7_LOCATION_ALT_DLDI : CARDENGINEI_ARM7_LOCATION_DLDI)))) {
 				dbg_printf("ce7 DLDI patch failed\n");
 				errorOutput();
 			}

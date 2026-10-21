@@ -35,6 +35,7 @@ redistribute it freely, subject to the following restrictions:
 #include <nds/arm7/input.h>
 #include <nds/fifocommon.h>
 #include <nds/system.h>
+#include <nds/card.h>
 #include <nds/arm7/aes.h>
 #include <nds/arm7/clock.h>
 #include <nds/arm7/i2c.h>
@@ -83,6 +84,14 @@ void myFIFOValue32Handler(u32 value, void* userdata) {
  	nocashMessage("default");
 	nocashMessage("fifoSendValue32");
 	fifoSendValue32(FIFO_USER_02, *(u16*)value);
+}
+
+// R4 save copy (arm9 r4save.cpp): the card's reset line follows the ROMCTRL of whichever CPU owns
+// the bus, so the ARM9 hands the bus over and asks this side to release it too, right after
+// powering the slot. Answers with ROMCTRL.
+static void r4ReleaseResetHandler(u32 value, void* userdata) {
+	REG_ROMCTRL = 0x20000000;
+	fifoSendValue32(FIFO_USER_08, REG_ROMCTRL);
 }
 
 int main(void) {
@@ -174,6 +183,7 @@ int main(void) {
 	fifoSendValue32(FIFO_USER_05, 1);
 
 	fifoSetValue32Handler(FIFO_USER_01, myFIFOValue32Handler, NULL);
+	fifoSetValue32Handler(FIFO_USER_08, r4ReleaseResetHandler, NULL);
 
 	// Keep the ARM7 mostly idle
 	while (1) {

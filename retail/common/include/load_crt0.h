@@ -77,6 +77,8 @@ typedef struct loadCrt0 {
 	u16 cacheBlockSize;
 	char bannerSavPath[64];
 	unsigned char version[20];
+	u32 saveMirrorCluster;	// R4 save copy (arm9 r4save.cpp): the save's first cluster on the flashcard; 0: off
+	u32 saveMirrorLogCluster;	// r4save.log on the SD: the loader writes its part in the last KB
 } loadCrt0;
 
 #endif // LOAD_CRT0_H

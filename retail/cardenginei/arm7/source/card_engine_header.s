@@ -46,6 +46,7 @@
 .global romPartFrame
 .global romMapLines
 .global romMap
+.global saveMirrorCluster
 
 #define ICACHE_SIZE	0x2000
 #define DCACHE_SIZE	0x1000
@@ -171,6 +172,8 @@ romMap:
 
 	.word	0x00000000
 	.word	0x00000000
+	.word	0x00000000
+saveMirrorCluster:	@ R4 save copy: the save's first cluster on the flashcard (0: off)
 	.word	0x00000000
 .align	4
 

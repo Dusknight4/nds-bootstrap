@@ -112,6 +112,7 @@ extern u32 ramDumpCluster;
 extern u32 screenshotCluster;
 extern u32 pageFileCluster;
 extern u32 manualCluster;
+extern u32 saveMirrorCluster;	// R4 save copy: every save also goes to this file on the flashcard
 extern module_params_t* moduleParams;
 extern u32 valueBits;
 extern s32 mainScreen;
@@ -174,6 +175,7 @@ static aFile srParamsFile;
 static aFile screenshotFile;
 static aFile pageFile;
 static aFile manualFile;
+static aFile savMirrorFile;
 
 static int saveTimer = 0;
 
@@ -285,8 +287,11 @@ static void driveInitialize(void) {
 		}
 		FAT_InitFiles(false, false);
 	}
-	if (((valueBits & gameOnFlashcard) && !(valueBits & ROMinRAM)) || (valueBits & saveOnFlashcard)) {
+	if (((valueBits & gameOnFlashcard) && !(valueBits & ROMinRAM)) || (valueBits & saveOnFlashcard) || saveMirrorCluster) {
 		FAT_InitFiles(false, true);
+	}
+	if (saveMirrorCluster) {
+		getFileFromCluster(&savMirrorFile, saveMirrorCluster, true);
 	}
 
 	getFileFromCluster(&patchOffsetCacheFile, patchOffsetCacheFileCluster, (valueBits & gameOnFlashcard));
@@ -1349,6 +1354,9 @@ static void nandWrite(void) {
 	sdmmc_set_ndma_slot(4);
 	fileWrite((char *)memory, savFile, flash, len);
 	sdmmc_set_ndma_slot(0);
+	if (saveMirrorCluster) {
+		fileWrite((char *)memory, &savMirrorFile, flash, len);
+	}
 	//cardReadLED(false, true);
 }
 
@@ -2373,6 +2381,15 @@ bool eepromPageWrite(u32 dst, const void *src, u32 len) {
 			fileWrite(src, savFile, (dst % saveSize), len);
 		}
 		sdmmc_set_ndma_slot(0);
+		if (saveMirrorCluster) {
+			if ((dst % saveSize)+len > saveSize) {
+				u32 len2 = saveSize - (dst % saveSize);
+				fileWrite(src, &savMirrorFile, (dst % saveSize), len2);
+				fileWrite(src+len2, &savMirrorFile, 0, len - len2);
+			} else {
+				fileWrite(src, &savMirrorFile, (dst % saveSize), len);
+			}
+		}
 		#ifdef TWLSDK
 		//if (doBak) restoreSdBakData();
 		#endif

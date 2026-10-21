@@ -73,6 +73,7 @@
 #define BLOWFISH_LOCATION_B4DS                       0x023ECE00
 #define CARDENGINEI_ARM9_BUFFERED_LOCATION           0x026F0000
 #define BLOWFISH_LOCATION                            0x027B0C00
+#define R4_CHECK_LOCATION                            0x02F5FFF0	// R4 save copy: the R4's status at the launcher's hand-over (unused end of the WiFi blob's area)
 #define ARM7_FIX_BUFFERED_LOCATION                   0x027B1E00
 #define CARDENGINEI_ARM7_BUFFERED_LOCATION           0x027B2000
 #define CARDENGINEI_ARM9_CLUT_BUFFERED_LOCATION      0x027CE800

@@ -92,6 +92,8 @@
 	.global cacheBlockSize
 	.global bannerSavPath
 	.global version
+	.global saveMirrorCluster
+	.global saveMirrorLogCluster
 @---------------------------------------------------------------------------------
 	.align	4
 	.arm
@@ -259,6 +261,11 @@ bannerSavPath:
 	.space	64
 version:
 	.space	20
+	.align 2
+saveMirrorCluster:		@ R4 save copy: the save's first cluster on the flashcard (0: off)
+	.word	0
+saveMirrorLogCluster:	@ r4save.log on the SD: the loader writes its part in the last KB
+	.word	0
 .align 4
 
 startUp:

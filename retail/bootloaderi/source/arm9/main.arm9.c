@@ -350,6 +350,14 @@ void arm9_main(void) {
 			initMBKARM9_dsiMode();
 			arm9_stateFlag = ARM9_READY;
 		}
+		if (arm9_stateFlag == ARM9_R4RELEASE) {
+			// The card's reset line follows the ROMCTRL of whichever CPU owns the bus: release this
+			// side's too, so the game handing the bus to the ARM9 doesn't reset the R4
+			REG_EXMEMCNT &= ~ARM7_OWNS_CARD;
+			*(vu32*)0x040001A4 = 0x20000000;	// ROMCTRL: release reset
+			REG_EXMEMCNT |= ARM7_OWNS_CARD;
+			arm9_stateFlag = ARM9_READY;
+		}
 		if (arm9_stateFlag == ARM9_WRAMONARM7) {
 			if (REG_MBK7 != 0) {
 				for (int i = 0; i < 16; i++) {

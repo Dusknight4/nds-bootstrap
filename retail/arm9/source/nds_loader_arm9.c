@@ -41,6 +41,8 @@
 #include "load_crt0.h"
 #include "cardengine_header_arm7.h"
 #include "version.h"
+#include "r4card.h"
+#include <nds/arm9/cache.h>
 
 //#define memcpy __builtin_memcpy
 
@@ -262,6 +264,20 @@ int runNds(u32 cluster, u32 saveCluster, u32 donorTwlCluster, /* u32 gbaCluster,
 		}
 	}
 
+	if (conf->saveMirrorCluster) {
+		// R4 save copy: the R4's driver for the loader and the card engine (r4save.cpp)
+		toncset(lz77ImageBuffer, 0, 0x1000);
+		FILE* dldiFile = fopen("nitro:/dstt_sd.dldi", "rb");
+		if (dldiFile) {
+			fread(lz77ImageBuffer, 1, 0x1000, dldiFile);
+			fclose(dldiFile);
+			*(u32*)(lz77ImageBuffer + 0x80) = conf->saveMirrorSdhc;	// dsttSdhc
+			altDldi = true;
+		} else {
+			conf->saveMirrorCluster = 0;
+		}
+	}
+
 	loadCrt0* loader = (loadCrt0*)loaderBin;
 
 	loader->ndsBootstrapCluster  = conf->ndsBootstrapCluster;
@@ -323,6 +339,8 @@ int runNds(u32 cluster, u32 saveCluster, u32 donorTwlCluster, /* u32 gbaCluster,
 	loader->language                    = conf->language;
 	loader->region                      = conf->region;
 	loader->saveRelocation              = conf->saveRelocation;
+	loader->saveMirrorCluster           = conf->saveMirrorCluster;
+	loader->saveMirrorLogCluster        = conf->saveMirrorLogCluster;
 	for (int i = 0; i < 12; i++) {
 		loader->remappedKeys[i]         = conf->remappedKeys[i];
 	}
@@ -351,7 +369,7 @@ int runNds(u32 cluster, u32 saveCluster, u32 donorTwlCluster, /* u32 gbaCluster,
 	// Load the loader into the correct address
 	tonccpy(lc0, loader, 0x40000); //vramcpy(LCDC_BANK_D, loader, loaderSize);
 
-	if(conf->gameOnFlashcard || conf->saveOnFlashcard) {
+	if(conf->gameOnFlashcard || conf->saveOnFlashcard || conf->saveMirrorCluster) {
 		// Patch the loader with a DLDI for the card
 		if (!dldiPatchLoader ((data_t*)lc0, 0x40000, conf->initDisc, altDldi)) {
 			return 3;
@@ -365,6 +383,15 @@ int runNds(u32 cluster, u32 saveCluster, u32 donorTwlCluster, /* u32 gbaCluster,
 
 	if (dsiFeatures() && conf->b4dsMode) {
 		REG_SCFG_EXT = conf->b4dsMode == 2 ? 0x8300C000 : 0x83000000;
+	}
+
+	if (conf->saveMirrorCluster) {
+		// R4 save copy: the R4's status (50h, 0 = in its SD mode) as the loader takes over, for its log
+		sysSetCardOwner(BUS_OWNER_ARM9);
+		u32 status = 0xDEADDEAD;
+		dsttStatus(&status);
+		*(vu32*)R4_CHECK_LOCATION = status;
+		DC_FlushRange((void*)R4_CHECK_LOCATION, 32);
 	}
 
 	// Reset into a passme loop

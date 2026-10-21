@@ -134,6 +134,7 @@ typedef struct cardengineArm7 {
 	u32 romPartFrame;
 	u32 romMapLines;
 	u32 romMap[8][3]; // 0: ROM part start, 1: ROM part start in RAM, 2: ROM part end in RAM
+	u32 saveMirrorCluster; // R4 save copy: the save's first cluster on the flashcard (0: off); not in the DSiWare ce7
 } cardengineArm7;
 
 //

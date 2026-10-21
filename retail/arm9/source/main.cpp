@@ -19,6 +19,7 @@
 #include "nds_loader_arm9.h"
 #include "conf_sd.h"
 #include "version.h"
+#include "r4save.h"
 
 #define REG_SCFG_EXT7 *(u32*)0x02FFFDF0
 
@@ -474,6 +475,8 @@ static int runNdsFile(configuration* conf) {
 	if (stat(conf->ndsPath, &st) < 0) {
 		return -2;
 	}
+
+	r4SavePrepare(conf);	// R4 save copy: before the save's cluster is taken (it may update the save)
 
 	if (stat(conf->savPath, &stSav) >= 0) {
 		clusterSav = stSav.st_ino;

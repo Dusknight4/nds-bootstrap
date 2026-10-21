@@ -2943,6 +2943,12 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 	// Create AP-fixed overlay binary
 	createApFixOverlayBin(conf);
 
+	{
+		// R4 save copy (r4save.cpp): the save's date before the update below (when it was last played)
+		struct stat stSav;
+		conf->saveMtimeBefore = (stat(conf->savPath, &stSav) == 0) ? stSav.st_mtime : 0;
+	}
+
 	if ((!dsiFeatures() || conf->b4dsMode) || (conf->valueBits4 & BIT(0)) || !conf->isDSiWare) {
 		// Update modified date
 		FILE *savFile = fopen(conf->savPath, "r+");

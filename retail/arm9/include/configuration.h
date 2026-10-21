@@ -103,6 +103,10 @@ typedef struct configuration {
 	char* manualPath;
 	bool saveRelocation;
 	u16 cacheBlockSize;
+	u32 saveMirrorCluster;	// R4 save copy (r4save.cpp): the save's first cluster on the R4; 0: off
+	u32 saveMirrorSdhc;
+	u32 saveMirrorLogCluster;	// r4save.log, for the loader's notes
+	long saveMtimeBefore;	// the save's date before nds-bootstrap's own date update (conf_sd.cpp)
 } configuration;
 
 #endif // CONFIGURATION_H
