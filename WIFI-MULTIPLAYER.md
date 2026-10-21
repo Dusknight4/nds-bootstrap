@@ -1,6 +1,6 @@
 # Local wireless over WiFi with WideMelon
 
-This build of nds-bootstrap (**v2.17.0-M1**, based on the official v2.17.0)
+This build of nds-bootstrap (**v2.17.0-M2**, based on the official v2.17.0)
 lets a DS game's **local wireless** (DS-to-DS play) run over your WiFi network
 instead, so a real console can play with
 **[WideMelon](https://github.com/Dusknight4/widemelon/releases/tag/v1.0.4-mod.5)**
@@ -11,7 +11,6 @@ v2.17.0.
 Both just connect to the same WiFi network. In Pokémon Platinum and HeartGold
 (US) the Union Room, trades and battles work in both directions, whichever side
 starts the talk, including Platinum with HeartGold. Other games are untested.
-**This is an alpha.**
 
 ## What you need
 
@@ -32,8 +31,8 @@ starts the talk, including Platinum with HeartGold. Other games are untested.
 
 ## Installing
 
-1. Download `nds-bootstrap-M1.zip` from the
-   [v2.17.0-M1 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.0-M1).
+1. Download `nds-bootstrap-M2.zip` from the
+   [v2.17.0-M2 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.0-M2).
 2. On the SD card, back up `_nds/nds-bootstrap-nightly.nds` if you have it.
 3. Copy the zip's `_nds` folder onto the SD card's root, replacing that file.
    It holds `nds-bootstrap-nightly.nds` (this build, in the *nightly* slot, so
@@ -42,10 +41,6 @@ starts the talk, including Platinum with HeartGold. Other games are untested.
 4. In TWiLight Menu++, open the game's settings (press **Y** on the game) and
    set **Bootstrap** to **Nightly**. Do this for each game you'll play over
    WiFi. (Or set nightly as the default in TWiLight Menu++'s settings.)
-
-The zip also has `nds-bootstrap-release.nds`, the same build under the
-release name, in `release files/`, if you'd rather replace your release
-nds-bootstrap instead (then games don't need the Nightly setting).
 
 ## Turning it on
 
