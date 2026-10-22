@@ -1,13 +1,14 @@
 > [!NOTE]
 > **This is a fork for WiFi multiplayer with [WideMelon](https://github.com/Dusknight4/widemelon).**
-> Version **v2.17.0-M2** (based on the official v2.17.0) adds **Local as WiFi**: a DS game's local
+> Version **v2.17.3** (based on the official v2.17.0) adds **Local as WiFi**: a DS game's local
 > wireless runs over your WiFi network, so a DSi or 3DS (TWiLight Menu++, DSi mode) can trade and battle
 > with [WideMelon](https://github.com/Dusknight4/widemelon/releases/tag/v1.0.4-mod.5) on a PC on the same
-> network. Its only purpose is multiplayer with WideMelon; for anything else, use the
+> network. It also adds the **R4 save copy**: with an R4 in the game card slot, a game's save is kept on
+> the R4 too ([R4-SAVE-COPY.md](R4-SAVE-COPY.md)). For anything else, use the
 > [official nds-bootstrap](https://github.com/DS-Homebrew/nds-bootstrap).
 >
 > **Setup: [WIFI-MULTIPLAYER.md](WIFI-MULTIPLAYER.md)** - Download:
-> [v2.17.0-M2 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.0-M2).
+> [v2.17.3 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.3).
 > Please report problems with this fork here, not to the nds-bootstrap team.
 
 <p align="center">

@@ -1,12 +1,12 @@
 # Local wireless over WiFi with WideMelon
 
-This build of nds-bootstrap (**v2.17.0-M2**, based on the official v2.17.0)
+This build of nds-bootstrap (**v2.17.3**, based on the official v2.17.0)
 lets a DS game's **local wireless** (DS-to-DS play) run over your WiFi network
 instead, so a real console can play with
 **[WideMelon](https://github.com/Dusknight4/widemelon/releases/tag/v1.0.4-mod.5)**
 on a PC: a DS emulator with the matching multiplayer support. That is the only
-reason this build exists; without WideMelon it's the same as nds-bootstrap
-v2.17.0.
+reason this build exists; without WideMelon (and without the
+[R4 save copy](R4-SAVE-COPY.md)) it's the same as nds-bootstrap v2.17.0.
 
 Both just connect to the same WiFi network. In Pokémon Platinum and HeartGold
 (US) the Union Room, trades and battles work in both directions, whichever side
@@ -31,8 +31,8 @@ starts the talk, including Platinum with HeartGold. Other games are untested.
 
 ## Installing
 
-1. Download `nds-bootstrap-M2.zip` from the
-   [v2.17.0-M2 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.0-M2).
+1. Download `nds-bootstrap-v2.17.3.zip` from the
+   [v2.17.3 release](https://github.com/Dusknight4/nds-bootstrap/releases/tag/v2.17.3).
 2. On the SD card, back up `_nds/nds-bootstrap-nightly.nds` if you have it.
 3. Copy the zip's `_nds` folder onto the SD card's root, replacing that file.
    It holds `nds-bootstrap-nightly.nds` (this build, in the *nightly* slot, so
