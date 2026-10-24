@@ -134,10 +134,14 @@ enum { ST_READY = 0, ST_STOP = 1, ST_IDLE = 2, ST_CLASS1 = 3, ST_SCAN = 5, ST_CO
 #define PARENT_HEARD_FRAMES 60      // a scan finds a parent heard this lately
 #define PARENT_KEEP_FRAMES 300      // and forgets one not heard this long
 // A link partner we've had nothing from for the game's MP lifetime (WM_SetLifeTime, in 100 ms;
-// Pokemon sets 10 s) is gone (out of range, switched off): out of the link, as the real ARM7's
-// AUTO_DISCONNECT. Until then the link holds, as on the air, where a console a little out of
-// range (a crowded bus) misses its turns and comes back. Before the game sets one: this.
-#define LIFETIME_DEFAULT_FRAMES 240
+// Pokemon sets 10 s for its battles and the like) is gone (out of range, switched off): out of the
+// link, as the real ARM7's AUTO_DISCONNECT. Until then the link holds, as on the air, where a console
+// a little out of range (a crowded bus) misses its turns and comes back. A game that sets none (the
+// Union Room, the Underground): the real ARM7 then never ends a link for silence (its MP lifetime
+// is off and the radio's own station lifetime is 0xFFFF), leaving it to the game, whose wireless
+// layer only reports what WM tells it; this, the same 10 s, so a console gone for good (switched
+// off, a PC asleep) doesn't leave the other stuck on "Communicating".
+#define LIFETIME_DEFAULT_FRAMES 600
 // (the child) the parent unheard this long: the "beacon lost" notice (the game takes no action
 // on it), the link still up
 #define BEACON_LOST_FRAMES 120
