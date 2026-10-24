@@ -110,8 +110,7 @@ static u8 s_netMem[0x6000] __attribute__((aligned(32)));
 // ---- the bridge to WideMelon: blob_bridge.c (finding it, hello and log messages) ----
 static void onUdp(uint32_t src_ip, uint16_t src_port, uint16_t dst_port, const void* data, unsigned len)
 {
-	(void)src_port;
-	if (dst_port == BRIDGE_PORT) bridgeRx(src_ip, (const u8*)data, len);
+	if (dst_port == BRIDGE_PORT) bridgeRx(src_ip, src_port, (const u8*)data, len);
 }
 
 // ---- the radio only while the game uses its wireless (blob_radio.c) ----

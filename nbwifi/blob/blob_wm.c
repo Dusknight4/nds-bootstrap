@@ -1,6 +1,7 @@
 // nbwifi blob: the game's local wireless over the bridge. wmhle (the ARM7 half
 // of the SDK's wireless library, reimplemented) takes the game's WM requests
-// in place of the ARM7 wireless component, and talks to WideMelon over UDP.
+// in place of the ARM7 wireless component, and talks to the others on the network (DSes and
+// MultiMelons) over UDP, through the link in blob_bridge.c.
 //
 // The requests come through the ARM7's PXI FIFO dispatcher: its handler table
 // gets our handler for the WM tag (10) once the game has put its own there.
@@ -11,6 +12,7 @@
 #include "wmhle.h"
 #include "blob.h"
 #include "blob_radio.h"
+#include "blob_bridge.h"
 
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -25,7 +27,6 @@ void nbwLogf(const char* fmt, ...);
 #define REG_IPC_FIFO_TX  (*(vu32*)0x04000188)
 #define CALLBACK_CONTROL (*(vu16*)0x027FFF96)
 
-#define BRIDGE_PORT 7071
 
 // The game's ARM7 PXI dispatch table (the WM entry is table[10]) is found by the code of the
 // SDK's FIFO receive handler (pxi_find.h), a slice of ARM7 RAM a frame. (It was Platinum's fixed
@@ -33,7 +34,6 @@ void nbwLogf(const char* fmt, ...);
 // game's own wireless driver, which couldn't start beside ours: a blue screen at the title menu.)
 #include "pxi_find.h"
 
-static u32 s_wmIp;          // WideMelon, once it has answered
 static u32 s_lastV, s_lines;    // a running scanline count: our clock
 
 static u32 linesNow(void)
@@ -70,10 +70,7 @@ static void hostToArm9(uint32_t word)
 	REG_IPC_FIFO_TX = word;
 }
 
-static void hostBridgeSend(const uint8_t* msg, unsigned len)
-{
-	if (s_wmIp) nbwifiUdpSend(s_wmIp, BRIDGE_PORT, BRIDGE_PORT, msg, len);
-}
+static void hostBridgeSend(const uint8_t* msg, unsigned len) { bridgeSend(msg, len); }
 
 static void hostPollNet(void) { nbwifiPoll(); }
 
@@ -382,16 +379,12 @@ void wmGlueInit(void)
 	wmhleInit(&s_host);
 }
 
-// a DsBridge message from WideMelon (the first one tells us where it is)
+// a DsBridge message from another console (blob_bridge.c: not the link's own)
 void wmGlueBridgeRx(u32 srcIp, const u8* data, unsigned len)
 {
-	if (!s_wmIp) s_wmIp = srcIp;
+	(void)srcIp;
 	wmhleBridgeRx(data, len);
 }
-
-void wmGlueSetPeer(u32 ip) { s_wmIp = ip; }
-
-u32 wmGlueWideMelonIp(void) { return s_wmIp; }
 
 void wmGlueFrame(void)
 {

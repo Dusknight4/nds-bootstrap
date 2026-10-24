@@ -63,6 +63,7 @@ enum { ST_READY = 0, ST_STOP = 1, ST_IDLE = 2, ST_CLASS1 = 3, ST_SCAN = 5, ST_CO
 #define S_mp_parentVCount    0x040
 #define S_mp_childVCount     0x042
 #define S_mp_parentInterval  0x044
+#define S_mp_childInterval   0x048
 #define S_mp_minFreq         0x058
 #define S_mp_freq            0x05A
 #define S_mp_maxFreq         0x05C
@@ -91,6 +92,7 @@ enum { ST_READY = 0, ST_STOP = 1, ST_IDLE = 2, ST_CLASS1 = 3, ST_SCAN = 5, ST_CO
 #define S_enableChannel      0x1F4
 #define S_allowedChannel     0x1F6
 #define S_portSeqNo          0x1F8
+#define S_wlVersion          0x020      // (the wireless firmware's version and the chip's ids, as the real ARM7 fills them)
 #define S_SIZE               0x7D0
 
 // WMParentParam offsets (inside S_pparam)
@@ -117,7 +119,24 @@ enum { ST_READY = 0, ST_STOP = 1, ST_IDLE = 2, ST_CLASS1 = 3, ST_SCAN = 5, ST_CO
 #define CB_QUEUE   48
 #define CB_MAX     0xC0                 // largest callback we send (bytes; fifo7to9 is 0x100)
 #define SEND_QUEUE 32
-#define MAX_CHILD  15
+// children a parent takes (WM allows 15; Pokémon's most is the Underground's 7). The DS blob
+// builds with 7: its memory is tight, and the reply buffers are one per child
+#ifndef WMHLE_MAX_CHILD
+#define WMHLE_MAX_CHILD 15
+#endif
+#define MAX_CHILD WMHLE_MAX_CHILD
+// the parents we've heard (their beacons, for scans): as a real DS, every parent in range (the
+// DS blob builds with 4: three others hosting at once is the most a four-player game has)
+#ifndef WMHLE_MAX_PARENTS
+#define WMHLE_MAX_PARENTS 6
+#endif
+#define MAX_PARENTS WMHLE_MAX_PARENTS
+#define PARENT_HEARD_FRAMES 60      // a scan finds a parent heard this lately
+#define PARENT_KEEP_FRAMES 300      // and forgets one not heard this long
+// (as the parent) a child we've had nothing from this long is gone (out of range, switched
+// off): out of the link, as the real ARM7 does once its lifetime runs out, so it doesn't hold
+// up every other child's rounds
+#define CHILD_SILENT_FRAMES 240
 
 typedef struct {
 	u16 len;
@@ -161,13 +180,10 @@ static struct {
 	u32 scanBuf;
 	u16 scanChannel;
 	u32 scanEnd;
-	// the remote parent we've heard (its beacon body, kept)
-	bool remoteParent;
+	// the parent we're connecting to or connected to (as a child)
 	u8 remoteMac[6];
-	u8 remoteChannel;
-	u32 remoteHeardAt;
-	u8 remoteBeacon[256];
-	unsigned remoteBeaconLen;
+	u16 scanBssidAny;           // (the scan) any parent, or only scanBssid
+	u8 scanBssid[6];
 	// connecting / connected as a child
 	bool connecting;
 	u32 connectStart;
@@ -176,7 +192,9 @@ static struct {
 	// MP
 	SendPacket sendq[SEND_QUEUE];
 	u16 nextSeqNo[16];          // per port, for the ports with sequence numbers
-	u16 lastRecvSeq[16][16];    // per sender aid, per port: duplicates are dropped
+	u16 lastRecvSeq[MAX_CHILD + 1][16];    // per sender aid, per port: duplicates are dropped
+	u32 childHeardAt[MAX_CHILD + 1];       // (parent) the frame we last had a reply from each child
+	u16 childPolls[MAX_CHILD + 1];         // (parent) CMDs sent it since (a child never polled isn't silent)
 	u16 cmdSeq;                 // 802.11 sequence of our frames
 	u16 lastCmdSeq;             // child: the parent's last CMD (for our reply's RefSeq)
 	u16 ackCounter;
@@ -190,7 +208,38 @@ static struct {
 	u32 nextUid;                // SendPacket uids
 	u32 inFlightBuf;            // the receive buffer of the callback the ARM9 has now
 	u32 nBufClobbered;          // (log) CMDs let go: their receive buffer still pointed into by unread callbacks
+	u32 nNotForUs;              // (log) messages for another console, dropped
+	// INITIALIZE's answer, held back as long as the real ARM7 takes (it powers the radio up)
+	bool initReplyPending;
+	u16 initReplyApi;
+	u32 initReplyAt;
 } W;
+// The real ARM7 answers INITIALIZE some frames after it's asked (powering the radio up), and
+// games count on that: Platinum's Underground asks it, sets "alone" (which only takes once its
+// comm system exists) and starts its client, which needs the answer; on a DS that fails the
+// first time, and the second time round "alone" takes. Answered at once, the client started
+// first time, "alone" never took, and the game waited for good for a link it didn't have: the
+// player frozen, Roark's welcome never coming, no one ever found.
+#define INIT_REPLY_FRAMES 6
+
+// the parents in range (their latest beacon): a scan reports one each time, in turn, as a
+// real one reports whichever it hears first (with several hosting, the game scans again
+// and again and so finds them all)
+typedef struct {
+	bool used;
+	u8 mac[6];
+	u8 channel;
+	u32 heardAt, reportedAt;    // frames
+	u16 len;
+	u8 beacon[256];
+} RemoteParent;
+static RemoteParent s_parents[MAX_PARENTS];
+
+static RemoteParent* parentFind(const u8* mac)
+{
+	for (int i = 0; i < MAX_PARENTS; i++) if (s_parents[i].used && memcmp(s_parents[i].mac, mac, 6) == 0) return &s_parents[i];
+	return NULL;
+}
 
 // ---- little helpers on DS memory ----
 
@@ -337,7 +386,8 @@ static void deliverCallbacks(void)
 			// the next INITIALIZE
 			W.initialized = false;
 			W.cbOut = W.cbIn;
-			W.scanning = W.connecting = W.remoteParent = W.waitingAck = false;
+			W.scanning = W.connecting = W.waitingAck = false;
+			memset(s_parents, 0, sizeof(s_parents));
 		}
 	}
 }
@@ -346,6 +396,15 @@ static void deliverCallbacks(void)
 
 enum { DSB_HostInfo = 1, DSB_Join, DSB_JoinOk, DSB_Cmd, DSB_Reply, DSB_Ack, DSB_Leave, DSB_Hello };
 #define DSB_HEAD 40
+// The message's destination, as the 802.11 frame's receiver address on the air: in the 8
+// header bytes after the timestamp (the melonDS header for an emulated console's frames;
+// zero from an older wmhle), its MAC and then the two mark bytes. With several consoles
+// on one network everyone hears everything, as on the air: a message for another console
+// (another parent's child joining, another group's replies) is dropped. The host's link
+// sends one with a destination to that console only, the rest (beacons) to all.
+#define DSB_DEST_AT    30
+#define DSB_DEST_MARK0 0xD5
+#define DSB_DEST_MARK1 0x4D
 
 typedef struct {
 	u8 type;
@@ -356,12 +415,18 @@ typedef struct {
 	unsigned bodyLen;
 } BridgeMsg;
 
-static void bridgeSend(u8 type, u16 aid, u16 seq, u16 refSeq, u16 frameCtl, const u8* body, unsigned bodyLen)
+static const u8 kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
+// dest: the console it's for (NULL: everyone, as a beacon)
+static void bridgeSend(const u8* dest, u8 type, u16 aid, u16 seq, u16 refSeq, u16 frameCtl, const u8* body, unsigned bodyLen)
 {
 	static u8 out[DSB_HEAD + 600];
 	if (bodyLen > 600) bodyLen = 600;
 	memset(out, 0, DSB_HEAD);
 	memcpy(out, "DSB1", 4);
+	memcpy(out + DSB_DEST_AT, dest ? dest : kBroadcastMac, 6);
+	out[DSB_DEST_AT + 6] = DSB_DEST_MARK0;
+	out[DSB_DEST_AT + 7] = DSB_DEST_MARK1;
 	out[4] = type;
 	if (type < 9) W.txCount[type]++;
 	memcpy(out + 5, W.h->mac, 6);
@@ -394,6 +459,26 @@ static bool bridgeParse(const u8* in, unsigned len, BridgeMsg* m)
 	return true;
 }
 
+// for another console (a destination that's neither us nor everyone)?
+static bool bridgeNotForUs(const u8* in)
+{
+	if (in[DSB_DEST_AT + 6] != DSB_DEST_MARK0 || in[DSB_DEST_AT + 7] != DSB_DEST_MARK1) return false;
+	const u8* d = in + DSB_DEST_AT;
+	return !(d[0] & 1) && memcmp(d, W.h->mac, 6) != 0;
+}
+
+// a deauthentication to one console: the reason, then whom it's for (as WideMelon's: a
+// child takes its parent's as its own only if it names it, so a parent letting one child
+// go doesn't end every child's link)
+static void sendLeave(const u8* to)
+{
+	u8 body[8];
+	put16(body, 3);         // reason: leaving
+	memcpy(body + 2, to, 6);
+	bridgeSend(to, DSB_Leave, sget16(S_aid), 0, 0xFFFF, 0x00C0, body, 8);
+}
+static void sendLeaveTo(u16 aid) { u8 mac[6]; memcpy(mac, M(W.status + S_childMacAddress + 6 * (aid - 1)), 6); sendLeave(mac); }
+
 // ---- requests ----
 
 static u32 arg(u32 req, int n) { return rd32(req + 4 * n); }
@@ -415,9 +500,24 @@ static void commonInit(u32 miscFlags)
 	sset32(S_miscFlags, miscFlags);
 	for (int i = 0; i < 16 * 8; i++) sset16(S_portSeqNo + 2 * i, 1);
 	copyOut(W.status + S_MacAddress, W.h->mac, 6);
-	sset16(S_enableChannel, 0x1FFF);         // channels 1-13
-	sset16(S_allowedChannel, 0x1FFF);
-	sset16(S_linkLevel, 3);
+	// as a DS's ARM7 leaves the block (melonDS's emulated firmware, compared field by field): the
+	// channels local wireless may use (1, 7 and 13), no link yet, the power save the child
+	// wants, the firmware's version and ids, the MP rates in force. (Platinum's Underground stood
+	// with its own player frozen on the block wmhle had left: channels 1-13, link level 3)
+	sset16(S_enableChannel, 0x3FFE);
+	sset16(S_allowedChannel, 0x1041);
+	sset16(S_linkLevel, 0);
+	sset16(S_pwrMgtMode, 1);
+	sset32(S_mp_childInterval, 0x20B);
+	{
+		static const u16 wl[8] = { 0x2E32, 0x3338, 0x302E, 0x0030, 0xC340, 0x0003, 0x006D, 0x5B1A };   // "2.83.00", ids
+		for (int i = 0; i < 8; i++) sset16(S_wlVersion + 2 * i, wl[i]);
+	}
+	sset16(0x1EC, 2);
+	sset16(0x7C0, 1); sset16(0x7C2, 1); sset16(0x7C4, 6);
+	// and its own buffer: where the status block and the callback FIFO are
+	wr32(W.arm7buf + 0, W.status);
+	wr32(W.arm7buf + 8, W.fifo7to9);
 	for (int i = 0; i < 32; i++) wr32(W.arm7buf + 0xD0 + 16 * i, 0x8000);
 	memset(W.sendq, 0, sizeof(W.sendq));
 	for (int p = 0; p < 16; p++) W.nextSeqNo[p] = 1;
@@ -468,6 +568,7 @@ static void reqStartParent(u32 req)
 	if (state() != ST_IDLE) { c = newCallback(API_START_PARENT, ERR_ILLEGAL_STATE, 0x30); return; }
 	rqReset();
 	setState(ST_PARENT);
+	sset16(S_mode, 1);
 	sset16(S_aid, 0);
 	sset16(S_child_bitmap, 0);
 	setSizes(pp16(PP_parentMaxSize), pp16(PP_childMaxSize), true);
@@ -483,8 +584,9 @@ static void reqStartParent(u32 req)
 static void endParent(void)
 {
 	sset16(S_beaconIndicateFlag, 0);
-	if (sget16(S_child_bitmap)) bridgeSend(DSB_Leave, 0, 0, 0xFFFF, 0x00C0, NULL, 0);
+	for (u16 a = 1; a <= MAX_CHILD; a++) if (sget16(S_child_bitmap) & (1 << a)) sendLeaveTo(a);
 	sset16(S_child_bitmap, 0);
+	sset16(S_linkLevel, 0);
 	stopMp();
 	setState(ST_IDLE);
 }
@@ -498,36 +600,62 @@ static void reqStartScan(u32 req)
 	W.scanning = true;
 	W.scanChannel = rd16(req + 2);
 	W.scanBuf = rd32(req + 4);
+	sset16(S_mode, 2);
+	sset32(S_pInfoBuf, W.scanBuf);
 	u16 ms = rd16(req + 8);
 	if (ms < 10) ms = 10;
 	W.scanEnd = W.frames + (ms * 60 + 999) / 1000;
 	sset16(S_scan_channel, W.scanChannel);
+	// bssid at 10: a parent to look for (a game finding its parent again), or broadcast for any
+	copyIn(W.scanBssid, req + 10, 6);
+	W.scanBssidAny = (W.scanBssid[0] & 1) || memcmp(W.scanBssid, "\0\0\0\0\0\0", 6) == 0;
+	// (testing: a scan's start, at most one a second)
+	static u32 lastLog;
+	if (g_wmhleVerbose && W.frames - lastLog >= 60) { lastLog = W.frames; logNum("wmhle: scan, channel / ms", W.scanChannel, ms); }
 }
 
-// a scan's result: the remote parent if we've heard it on this channel lately
+// a parent this scan would hear now: heard lately, on its channel, the one it looks for. Of
+// several, the one reported longest ago (each scan reports one, as the real one stops at the
+// first beacon it hears)
+static RemoteParent* scanPick(void)
+{
+	RemoteParent* best = NULL;
+	for (int i = 0; i < MAX_PARENTS; i++) {
+		RemoteParent* p = &s_parents[i];
+		if (!p->used || W.frames - p->heardAt >= PARENT_HEARD_FRAMES) continue;
+		if (W.scanChannel != 0 && p->channel != W.scanChannel) continue;
+		if (!W.scanBssidAny && memcmp(p->mac, W.scanBssid, 6) != 0) continue;
+		if (!best || (s32)(p->reportedAt - best->reportedAt) < 0) best = p;
+	}
+	return best;
+}
+
+// a scan's result: a parent if we've heard one on this channel lately
 static void scanTick(void)
 {
 	if (!W.scanning) return;
-	const bool heard = W.remoteParent && W.frames - W.remoteHeardAt < 60
-		&& (W.scanChannel == 0 || W.remoteChannel == W.scanChannel);
-	if (!heard && (s32)(W.frames - W.scanEnd) < 0) return;
+	RemoteParent* p = scanPick();
+	if (!p && (s32)(W.frames - W.scanEnd) < 0) return;
 	W.scanning = false;
 	u8* c = newCallback(API_START_SCAN, ERR_SUCCESS, 0x38 + 0x80);
 	put16(c + 0x10, W.scanChannel);
-	if (!heard) {
+	if (!p) {
 		put16(c + 8, SC_PARENT_NOT_FOUND);
+		static u32 lastNone;
+		if (g_wmhleVerbose && W.frames - lastNone >= 60) { lastNone = W.frames; logNum("wmhle: scan found no parent, channel", W.scanChannel, 0); }
 		return;
 	}
 	// the full WMBssDesc goes to the ARM9's scan buffer, the essentials into the callback
 	u8 desc[192];
 	AirBeaconInfo info;
-	if (!airParseBeacon(W.remoteBeacon, W.remoteBeaconLen, W.remoteMac, W.remoteChannel, desc, &info)) {
+	if (!airParseBeacon(p->beacon, p->len, p->mac, p->channel, desc, &info)) {
 		put16(c + 8, SC_PARENT_NOT_FOUND);
 		return;
 	}
+	p->reportedAt = W.frames;
 	if (W.scanBuf) copyOut(W.scanBuf, desc, sizeof(desc));
 	static u32 lastFound;
-	if (W.frames - lastFound >= 300) { logNum("wmhle: scan found the parent, channel", W.remoteChannel, 0); lastFound = W.frames; }
+	if (W.frames - lastFound >= 300) { logNum("wmhle: scan found a parent (MAC end), channel", (u32)p->mac[4] << 8 | p->mac[5], p->channel); lastFound = W.frames; }
 	put16(c + 8, SC_PARENT_FOUND);
 	airFillScanCallback(c, desc);               // MAC, channel, SSID, game info: as the real scan fills them
 	put16(c + 0x12, 3);                         // link level
@@ -554,7 +682,7 @@ static void reqStartConnect(u32 req)
 	const unsigned n = airBuildAssocReq(body, desc, ssid24);
 	memcpy(W.remoteMac, desc + 4, 6);
 	copyOut(W.status + S_parentMacAddress, desc + 4, 6);
-	bridgeSend(DSB_Join, 0, W.cmdSeq += 0x10, 0xFFFF, 0x0000, body, n);
+	bridgeSend(W.remoteMac, DSB_Join, 0, W.cmdSeq += 0x10, 0xFFFF, 0x0000, body, n);
 	W.connecting = true;
 	W.connectStart = W.frames;
 }
@@ -666,11 +794,13 @@ static void reqDisconnect(u32 req)
 	u8* c = newCallback(API_DISCONNECT, ERR_SUCCESS, 0x0C);
 	put16(c + 8, bitmap);
 	put16(c + 0x0A, bitmap);
-	bridgeSend(DSB_Leave, sget16(S_aid), 0, 0xFFFF, 0x00C0, NULL, 0);
 	if (state() == ST_CHILD || state() == ST_MP_CHILD) {
+		sendLeave(W.remoteMac);
 		stopMp();
 		setState(ST_IDLE);
 	} else {
+		// (each child let go is told, by name: the others stay)
+		for (u16 a = 1; a <= MAX_CHILD; a++) if ((bitmap & sget16(S_child_bitmap)) & (1 << a)) sendLeaveTo(a);
 		sset16(S_child_bitmap, (u16)(sget16(S_child_bitmap) & ~bitmap));
 		for (u16 a = 1; a <= MAX_CHILD; a++) if (bitmap & (1 << a)) dropPacketsFor(a);
 	}
@@ -701,7 +831,9 @@ static void runRequest(u32 req)
 			commonInit(arg(req, 4));
 			setState(apiid == API_INITIALIZE ? ST_IDLE : ST_STOP);
 			logNum("wmhle: initialize, status/fifo", W.status, W.fifo7to9);
-			reply(apiid, ERR_SUCCESS);
+			W.initReplyPending = true;          // (answered in INIT_REPLY_FRAMES: see initTick)
+			W.initReplyApi = apiid;
+			W.initReplyAt = W.frames + INIT_REPLY_FRAMES;
 			break;
 		case API_POWER_ON:   setState(ST_IDLE); reply(apiid, ERR_SUCCESS); break;
 		case API_POWER_OFF:  setState(ST_STOP); reply(apiid, ERR_SUCCESS); break;
@@ -766,7 +898,7 @@ static void runRequest(u32 req)
 		case API_START_PARENT:  reqStartParent(req); break;
 		case API_END_PARENT:    endParent(); reply(apiid, ERR_SUCCESS); break;
 		case API_START_SCAN:    reqStartScan(req); break;
-		case API_END_SCAN:      W.scanning = false; setState(ST_IDLE); reply(apiid, ERR_SUCCESS); break;
+		case API_END_SCAN:      W.scanning = false; setState(ST_IDLE); reply(apiid, ERR_SUCCESS); if (g_wmhleVerbose) logf_("wmhle: scan ended"); break;
 		case API_START_CONNECT: reqStartConnect(req); break;
 		case API_DISCONNECT:    reqDisconnect(req); break;
 		case API_START_MP:      reqStartMp(req); break;
@@ -783,10 +915,22 @@ static void runRequest(u32 req)
 			reply(apiid, ERR_SUCCESS);
 			break;
 	}
-	if (W.initialized) sset16(S_apiBusy, 0);
+	if (W.initialized) { sset16(S_apiBusy, 0); sset16(S_BusyApiid, 0); }
 }
 
 // ---- the parent: beacons, children joining, the MP round ----
+
+// a message (the round's CMD, its ack) to each of these children, by name: as on the air, where
+// one frame reaches them all, every one gets it (and the other consoles around don't)
+static void bridgeSendChildren(u16 children, u8 type, u16 seq, u16 frameCtl, const u8* body, unsigned n)
+{
+	for (u16 a = 1; a <= MAX_CHILD; a++) {
+		if (!((children >> a) & 1)) continue;
+		u8 mac[6];
+		memcpy(mac, M(W.status + S_childMacAddress + 6 * (a - 1)), 6);
+		bridgeSend(mac, type, 0, seq, 0xFFFF, frameCtl, body, n);
+	}
+}
 
 static void sendParentInfo(void)
 {
@@ -812,7 +956,7 @@ static void sendParentInfo(void)
 	copyIn(pi.userGameInfo, pp32(PP_userGameInfo), pi.userGameInfoLength);
 	u8 body[256];
 	const unsigned n = airBuildBeacon(body, &pi);
-	bridgeSend(DSB_HostInfo, 0, W.beaconSeq += 0x10, 0xFFFF, 0x0080, body, n);
+	bridgeSend(NULL, DSB_HostInfo, 0, W.beaconSeq += 0x10, 0xFFFF, 0x0080, body, n);   // (to everyone in range)
 	W.nextBeacon = W.frames + (pi.beaconPeriod * 60 + 999) / 1000;
 	// "beacon sent", if the game asked (WM_SetBeaconIndication): the Union Room counts these
 	// to know when to stop hosting a while and look for others
@@ -834,16 +978,19 @@ static void onJoin(const BridgeMsg* m)
 	for (u16 a = 1; a <= MAX_CHILD; a++)
 		if ((sget16(S_child_bitmap) & (1 << a)) && memcmp(M(W.status + S_childMacAddress + 6 * (a - 1)), m->mac, 6) == 0) aid = a;
 	if (!pp16(PP_entryFlag) && !aid) return;
-	for (u16 a = 1; a <= pp16(PP_maxEntry) && !aid; a++)
+	for (u16 a = 1; a <= pp16(PP_maxEntry) && a <= MAX_CHILD && !aid; a++)
 		if (!(sget16(S_child_bitmap) & (1 << a))) aid = a;
 	if (!aid) return;
 	copyOut(W.status + S_childMacAddress + 6 * (aid - 1), m->mac, 6);
 	sset16(S_child_bitmap, (u16)(sget16(S_child_bitmap) | 1 << aid));
 	W.childReplied[aid] = false;
+	W.childHeardAt[aid] = W.frames;
+	W.childPolls[aid] = 0;
+	sset16(S_linkLevel, 3);     // (the signal icon: full, while linked)
 	for (int p = 0; p < 16; p++) W.lastRecvSeq[aid][p] = 0xFFFF;
 	u8 body[64];
 	const unsigned n = airBuildAssocResp(body, aid);
-	bridgeSend(DSB_JoinOk, aid, W.cmdSeq += 0x10, 0xFFFF, 0x0010, body, n);
+	bridgeSend(m->mac, DSB_JoinOk, aid, W.cmdSeq += 0x10, 0xFFFF, 0x0010, body, n);
 	u8* c = newCallback(API_START_PARENT, ERR_SUCCESS, 0x30);
 	put16(c + 8, SC_CONNECTED);
 	memcpy(c + 0x0A, m->mac, 6);
@@ -851,7 +998,7 @@ static void onJoin(const BridgeMsg* m)
 	memcpy(c + 0x14, ssid32 + 8, 24);
 	put16(c + 0x2C, pp16(PP_parentMaxSize));
 	put16(c + 0x2E, pp16(PP_childMaxSize));
-	logNum("wmhle: child joined, aid", aid, 0);
+	logNum("wmhle: child joined, aid / MAC end", aid, (u32)m->mac[4] << 8 | m->mac[5]);
 }
 
 static void dropPacketsFor(u16 aid)
@@ -967,7 +1114,7 @@ static void parsePackets(u16 fromAid, const u8* mac, const u8* body, unsigned le
 			// a packet seen already (sent again for want of an ack) goes no further: as the
 			// SDK's ARM7 (WMSP port receive), one the same as the last or up to 127 behind
 			// it; anything else is new (a window of 16384 dropped far more than the SDK)
-			u16* last = &W.lastRecvSeq[fromAid & 15][port];
+			u16* last = &W.lastRecvSeq[fromAid <= MAX_CHILD ? fromAid : 0][port];
 			if (*last != 0xFFFF && (u16)((*last - seqNo) & 0x7FFF) < 0x80) { forMe = false; dup = true; W.nDupDropped++; }
 			else *last = seqNo;
 		}
@@ -1136,7 +1283,8 @@ static void parentMpRound(void)
 	for (int i = 0; i < s_round.nsent; i++)
 		if (!s_round.sent[i]->inCmd) { s_round.sent[i]->inCmd = true; s_round.sent[i]->firstCmd = s_round.cmdSeq; }
 	s_round.startFrame = W.frames;
-	bridgeSend(DSB_Cmd, 0, W.cmdSeq, 0xFFFF, 0x0228, body, n);
+	bridgeSendChildren(children, DSB_Cmd, W.cmdSeq, 0x0228, body, n);
+	for (u16 a = 1; a <= MAX_CHILD; a++) if (((children >> a) & 1) && W.childPolls[a] < 0xFFFF) W.childPolls[a]++;
 	s_round.pending = true;
 
 	const u32 start = W.h->nowUs();
@@ -1242,8 +1390,22 @@ static void parentMpFinish(void)
 		while (an < 4 + 2u * a) { put16(ack + an, 0xFFFF); an += 2; }
 		put16(ack + 4 + 2 * (a - 1), s_replyIn[a] && s_replyLen[a] >= 2 ? s_replyRef[a] : 0xFFFF);
 	}
-	bridgeSend(DSB_Ack, 0, W.cmdSeq, 0xFFFF, 0x0218, ack, an);
+	bridgeSendChildren(children, DSB_Ack, W.cmdSeq, 0x0218, ack, an);
 	leavePendingTick();     // (a child that left once its last reply was in: now)
+}
+
+// (each frame, MP parent) a child that hasn't answered for CHILD_SILENT_FRAMES while we kept
+// polling it (at least 30 CMDs) is gone: it's told (it may still hear us) and leaves the link
+static void childSilenceTick(void)
+{
+	for (u16 a = 1; a <= MAX_CHILD; a++) {
+		if (!(sget16(S_child_bitmap) & (1 << a))) continue;
+		if (W.frames - W.childHeardAt[a] <= CHILD_SILENT_FRAMES || W.childPolls[a] < 30) continue;
+		logNum("wmhle: a child stopped answering: aid, CMDs unanswered", a, W.childPolls[a]);
+		sendLeaveTo(a);
+		s_leavePending &= (u16)~(1 << a);
+		childLeaveNow(a);
+	}
 }
 
 // ---- the child: the parent's MP rounds ----
@@ -1303,7 +1465,7 @@ static void replyNotReady(const BridgeMsg* m)
 {
 	const u16 myAid = sget16(S_aid);
 	if (m->bodyLen < 4 || !((get16(m->body + 2) >> myAid) & 1)) return;
-	bridgeSend(DSB_Reply, myAid, W.cmdSeq += 0x10, m->seq, 0x0158, NULL, 0);
+	bridgeSend(W.remoteMac, DSB_Reply, myAid, W.cmdSeq += 0x10, m->seq, 0x0158, NULL, 0);
 	s_heldCmd.answered = true;
 }
 
@@ -1338,7 +1500,7 @@ static void onCmd(const BridgeMsg* m)
 	// data lost for good; a host also resends one it got no reply to): the same reply
 	// again, and nothing more to the ARM9 (it has had this one)
 	if (s_lastReply.valid && m->seq == s_lastReply.cmdSeq) {
-		bridgeSend(DSB_Reply, sget16(S_aid), s_lastReply.seq, m->seq, s_lastReply.len ? 0x0118 : 0x0158, s_lastReply.body, s_lastReply.len);   // (no body: it was "not ready")
+		bridgeSend(W.remoteMac, DSB_Reply, sget16(S_aid), s_lastReply.seq, m->seq, s_lastReply.len ? 0x0118 : 0x0158, s_lastReply.body, s_lastReply.len);   // (no body: it was "not ready")
 		return;
 	}
 	// the ARM9 behind with its callbacks: this CMD waits (held, see holdCmd), unanswered as
@@ -1410,7 +1572,7 @@ static void onCmd(const BridgeMsg* m)
 	r->ref = m->seq;
 	r->n = 0;
 	for (int i = 0; i < s_childNsent && r->n < 16; i++) r->uid[r->n++] = s_childSent[i]->uid;
-	bridgeSend(DSB_Reply, myAid, W.cmdSeq += 0x10, m->seq, 0x0118, body, n);
+	bridgeSend(W.remoteMac, DSB_Reply, myAid, W.cmdSeq += 0x10, m->seq, 0x0118, body, n);
 	// (kept, for a copy of this CMD: see above)
 	s_lastReply.valid = true;
 	s_lastReply.cmdSeq = m->seq;
@@ -1485,6 +1647,7 @@ static void onJoinOk(const BridgeMsg* m)
 	W.connecting = false;
 	W.lastFromParent = W.frames;
 	sset16(S_aid, aid);
+	sset16(S_linkLevel, 3);
 	setState(ST_CHILD);
 	u8 desc[192];
 	copyIn(desc, W.arm7buf + A7_connectPInfo, sizeof(desc));
@@ -1510,6 +1673,7 @@ static void childLost(u16 reasonCode)
 	s_lostPending = false;
 	stopMp();
 	setState(ST_IDLE);
+	sset16(S_linkLevel, 0);
 	u8* c = newCallback(API_START_CONNECT, ERR_SUCCESS, 0x1A);
 	put16(c + 8, reasonCode);
 	put16(c + 0x0A, sget16(S_aid));
@@ -1537,6 +1701,14 @@ void wmhleRequest(uint32_t data)
 	W.reqIn++;
 }
 
+// INITIALIZE's answer, once its time has come
+static void initTick(void)
+{
+	if (!W.initReplyPending || (s32)(W.frames - W.initReplyAt) < 0) return;
+	W.initReplyPending = false;
+	reply(W.initReplyApi, ERR_SUCCESS);
+}
+
 void wmhlePump(void)
 {
 	while (W.reqOut != W.reqIn) {
@@ -1545,6 +1717,7 @@ void wmhlePump(void)
 		runRequest(req);
 		wr16(req, (u16)(rd16(req) | REQUEST_ACCEPTED));    // the ARM9 may reuse it
 	}
+	initTick();
 	scanTick();
 	connectTick();
 	childHeldTick();
@@ -1564,7 +1737,9 @@ void wmhleFrame(void)
 		if (st == ST_CHILD || st == ST_MP_CHILD) childHeldTick();
 		if ((st == ST_CHILD || st == ST_MP_CHILD) && W.frames - W.lastFromParent > 120) childLost(SC_BEACON_LOST);
 		if (st == ST_MP_CHILD && W.waitingAck && W.frames - W.waitingAckFrame >= 2) childAckTimeout();
-		if (W.remoteParent && W.frames - W.remoteHeardAt > 300) W.remoteParent = false;
+		for (int i = 0; i < MAX_PARENTS; i++)
+			if (s_parents[i].used && W.frames - s_parents[i].heardAt > PARENT_KEEP_FRAMES) s_parents[i].used = false;
+		if (st == ST_MP_PARENT) childSilenceTick();
 		if (st >= ST_CLASS1 && st != ST_SCAN && W.frames % (g_wmhleVerbose ? 120 : 600) == 0) {
 			logNum("wmhle: state, rx join/joinok/cmd/ack", st, (u32)W.rxCount[2] << 24 | (u32)W.rxCount[3] << 16 | (u32)(W.rxCount[4] & 0xFF) << 8 | (W.rxCount[6] & 0xFF));
 			logNum("wmhle: tx join/joinok/cmd/reply/ack", (u32)W.txCount[2] << 24 | (u32)W.txCount[3] << 16 | (u32)W.txCount[4], (u32)W.txCount[5] << 16 | W.txCount[6]);
@@ -1584,30 +1759,60 @@ void wmhleFrame(void)
 	wmhlePump();
 }
 
+// a parent's beacon: kept (with the others in range) for scans
+static void onBeacon(const BridgeMsg* m)
+{
+	if (m->bodyLen > sizeof(s_parents[0].beacon)) return;
+	RemoteParent* p = parentFind(m->mac);
+	if (!p) {
+		// a new one: a free slot, else the one heard longest ago
+		p = &s_parents[0];
+		for (int i = 0; i < MAX_PARENTS; i++) {
+			if (!s_parents[i].used) { p = &s_parents[i]; break; }
+			if ((s32)(s_parents[i].heardAt - p->heardAt) < 0) p = &s_parents[i];
+		}
+		memset(p, 0, sizeof(*p));
+		p->used = true;
+		memcpy(p->mac, m->mac, 6);
+		p->reportedAt = W.frames - 0x10000;     // (never reported: the next scan's first pick)
+		logNum("wmhle: hearing a parent (MAC end), channel", (u32)m->mac[4] << 8 | m->mac[5], m->channel);
+	} else if (p->channel != m->channel) logNum("wmhle: a parent changed channel (MAC end), channel", (u32)m->mac[4] << 8 | m->mac[5], m->channel);
+	memcpy(p->beacon, m->body, m->bodyLen);
+	p->len = (u16)m->bodyLen;
+	p->channel = m->channel;
+	p->heardAt = W.frames;
+}
+
+// (parent) the aid of the child with this MAC, 0 none
+static u16 childAid(const u8* mac)
+{
+	for (u16 a = 1; a <= MAX_CHILD; a++)
+		if ((sget16(S_child_bitmap) & (1 << a)) && memcmp(M(W.status + S_childMacAddress + 6 * (a - 1)), mac, 6) == 0) return a;
+	return 0;
+}
+
 void wmhleBridgeRx(const uint8_t* msg, unsigned len)
 {
 	BridgeMsg m;
 	if (!bridgeParse(msg, len, &m) || !W.initialized) return;
+	if (bridgeNotForUs(msg)) { W.nNotForUs++; return; }      // (for another console)
 	if (m.type < 9) W.rxCount[m.type]++;
 	switch (m.type) {
 		case DSB_HostInfo:
-			// a remote parent's beacon: kept for scans, and as a sign of life
-			if (m.bodyLen > sizeof(W.remoteBeacon)) break;
-			if (!W.remoteParent || W.remoteChannel != m.channel) logNum("wmhle: hearing a parent, channel", m.channel, 0);
-			memcpy(W.remoteBeacon, m.body, m.bodyLen);
-			W.remoteBeaconLen = m.bodyLen;
-			if (state() != ST_CHILD && state() != ST_MP_CHILD) memcpy(W.remoteMac, m.mac, 6);
-			W.remoteChannel = m.channel;
-			W.remoteParent = true;
-			W.remoteHeardAt = W.frames;
-			if (memcmp(m.mac, W.remoteMac, 6) == 0) W.lastFromParent = W.frames;
+			// a parent's beacon: kept for scans, and our parent's a sign of life
+			onBeacon(&m);
+			if ((state() == ST_CHILD || state() == ST_MP_CHILD) && memcmp(m.mac, W.remoteMac, 6) == 0) W.lastFromParent = W.frames;
 			break;
 		case DSB_Join:   onJoin(&m); break;
 		case DSB_JoinOk: onJoinOk(&m); break;
 		case DSB_Cmd:    onCmd(&m); break;
 		case DSB_Reply:
-			// every reply is kept, in order (see s_rq): a late one answers the next round
-			if (m.aid >= 1 && m.aid <= MAX_CHILD && m.bodyLen <= sizeof(s_replyBody[0])) {
+			// every reply is kept, in order (see s_rq): a late one answers the next round. Only
+			// from the child that has that aid (another parent's child has its own aid 1)
+			if (state() != ST_MP_PARENT && state() != ST_PARENT) break;
+			if (m.aid >= 1 && m.aid <= MAX_CHILD && childAid(m.mac) == m.aid && m.bodyLen <= sizeof(s_replyBody[0])) {
+				W.childHeardAt[m.aid] = W.frames;
+				W.childPolls[m.aid] = 0;
 				rqPush(m.aid, m.seq, m.refSeq, m.body, m.bodyLen);
 				if (!s_round.pending) break;
 				rqTake();

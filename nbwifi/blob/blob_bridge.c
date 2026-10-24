@@ -1,90 +1,105 @@
-// nbwifi blob: the bridge to WideMelon, its protocol (DsBridge "DSB1") on its port: finding each
-// other, and our log. The DS says Hello by broadcast until a WideMelon (listening on the bridge
-// port) answers, then to it directly, once a second either way. WideMelon says hello back once a
-// second, to wherever it last heard us from (so a DS that comes back with another address is
-// found by its next hello). If WideMelon goes quiet for 15 s while we're online (it moved to
-// another address, or it was closed), we forget it and say hello by broadcast again: the radio
-// now leaves the network whenever the game's wireless is off, and much can change meanwhile.
+// nbwifi blob: the link to the others on the network, its protocol (DsBridge "DSB1") on its port.
+// As on the air, where every console in range hears every other, everyone on the network playing
+// local wireless over WiFi (DSes running this, and MultiMelons) is a peer, kept by wmpeers
+// (../wmhle/wmpeers.c, shared with MultiMelon, so both find each other the same way); the game
+// itself picks whom it talks to. Once a second while we're online we say hello, by broadcast
+// (finding the ones that don't know us yet) and to each one we know (so a lost broadcast loses no
+// one); one we've heard nothing from for 10 s of our time online is forgotten (the radio leaves
+// the network whenever the game's wireless is off, and comes back saying hello). wmhle's messages
+// go to the console they name, the rest (beacons) to everyone. Our log goes to the MultiMelons,
+// which keep it in their bridge log (the DS has nowhere to keep it).
 #include <string.h>
 #include "nbwifi.h"
 #include "blob_bridge.h"
+#include "wmpeers.h"
 
 void nbwLogf(const char* fmt, ...);   // nbwifi: adds a line to its log
-// blob_wm.c: the game's wireless over the bridge (wmhle)
+// blob_wm.c: the game's wireless over the link (wmhle)
 void wmGlueBridgeRx(uint32_t srcIp, const uint8_t* data, unsigned len);
-void wmGlueSetPeer(uint32_t ip);
 
-enum { DSB_HELLO = 8, DSB_LOG = 9 };
-#define DSB_HEAD_SIZE 40    // "DSB1", type, MAC, channel, AID, Seq, RefSeq, FC, duration, timestamp, header, body length
-
-static uint32_t s_wmIp;             // the WideMelon answering, once one has
-static uint32_t s_wmHellosIn, s_wmHellosOut;
-static uint32_t s_onlineTicks;      // bridgeTick calls (frames online)
-static uint32_t s_lastHelloIn;      // s_onlineTicks when WideMelon's hello last came (from s_wmIp)
+static WmPeers s_peers;
+static bool s_ready;                // s_peers set up (once online: the MAC is known)
+static uint32_t s_onlineTicks;      // bridgeTick calls (frames online): the clock peers' silence counts on
 static unsigned s_logSent;          // how far our log has gone out
+
+static void peersLog(void* ctx, const char* text) { (void)ctx; nbwLogf("[BRIDGE] %s\n", text); }
+
+static uint32_t onlineMs(void) { return s_onlineTicks * 50 / 3; }   // (frames at 60 a second)
+
+static void ensureReady(void)
+{
+	if (s_ready) return;
+	const uint8_t* mac = nbwifiMac();
+	// our hellos' tag (our own broadcast, heard back, is skipped; the MAC is checked too)
+	const uint8_t tag[4] = { mac[2], mac[3], mac[4], (uint8_t)(mac[5] ^ 0x5A) };
+	s_peers.log = peersLog;
+	s_peers.logCtx = 0;
+	wmpeersInit(&s_peers, mac, 'D', tag);
+	s_ready = true;
+}
 
 void bridgeReset(void)
 {
-	s_wmIp = s_wmHellosIn = s_wmHellosOut = s_onlineTicks = s_lastHelloIn = 0;
+	memset(&s_peers, 0, sizeof(s_peers));
+	s_ready = false;
+	s_onlineTicks = 0;
 	s_logSent = 0;
 }
 
-uint32_t bridgeWideMelonIp(void) { return s_wmIp; }
+// (an older WideMelon's hello says nothing: anyone not a DS is one)
+static bool isPc(const WmPeer* p) { return p->used && p->kind != 'D'; }
 
-static void bridgeSendHello(uint32_t ip)
+uint32_t bridgeWideMelonIp(void)
 {
-	uint8_t m[DSB_HEAD_SIZE + 4];
-	memset(m, 0, sizeof(m));
-	memcpy(m, "DSB1", 4);
-	m[4] = DSB_HELLO;
-	memcpy(m + 5, nbwifiMac(), 6);
-	m[22] = 0xFF; m[23] = 0xFF;        // RefSeq: none
-	m[38] = 4;                          // body: "DSHW", a real DS (WideMelon waits for our CMDs then)
-	memcpy(m + DSB_HEAD_SIZE, "DSHW", 4);
-	nbwifiUdpSend(ip, BRIDGE_PORT, BRIDGE_PORT, m, sizeof(m));
-	s_wmHellosOut++;
+	for (int i = 0; i < WMPEERS_MAX; i++) if (isPc(&s_peers.p[i])) return s_peers.p[i].ip;
+	return 0;
 }
 
-void bridgeRx(uint32_t src_ip, const uint8_t* data, unsigned len)
+int bridgePeerCount(void) { return s_ready ? wmpeersCount(&s_peers) : 0; }
+
+void bridgeRx(uint32_t src_ip, uint16_t src_port, const uint8_t* data, unsigned len)
 {
-	if (len < DSB_HEAD_SIZE || memcmp(data, "DSB1", 4) != 0) return;
-	if (!s_wmIp) {
-		s_wmIp = src_ip;
-		s_lastHelloIn = s_onlineTicks;
-		const uint8_t* ip = (const uint8_t*)&src_ip;
-		nbwLogf("[BRIDGE] WideMelon found at %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
-		wmGlueSetPeer(src_ip);     // where the game's wireless traffic goes
-	}
-	if (data[4] == DSB_HELLO) {
-		s_wmHellosIn++;
-		if (src_ip == s_wmIp) s_lastHelloIn = s_onlineTicks;
-	}
-	else wmGlueBridgeRx(src_ip, data, len);     // the game's wireless traffic
+	ensureReady();
+	if (wmpeersRx(&s_peers, src_ip, src_port, data, len, onlineMs()) < 0) return;
+	if (wmpeersIsHello(data, len) || wmpeersIsLog(data, len)) return;    // (the link's own)
+	wmGlueBridgeRx(src_ip, data, len);
 }
 
-// our log goes to WideMelon, which adds it to its bridge log (the DS has nowhere to keep it)
+void bridgeSend(const uint8_t* msg, unsigned len)
+{
+	ensureReady();
+	int idx[WMPEERS_MAX];
+	const int n = wmpeersRoute(&s_peers, msg, len, idx, WMPEERS_MAX);
+	for (int k = 0; k < n; k++) nbwifiUdpSend(s_peers.p[idx[k]].ip, s_peers.p[idx[k]].port, BRIDGE_PORT, msg, len);
+}
+
+// our log, to each MultiMelon (only once there's one: until then it waits)
 static void bridgeSendLog(void)
 {
-	static uint8_t m[DSB_HEAD_SIZE + 480];
-	const unsigned n = nbwifiLog((char*)m + DSB_HEAD_SIZE, 480, &s_logSent);
+	if (!bridgeWideMelonIp()) return;
+	static uint8_t m[40 + 480];
+	const unsigned n = nbwifiLog((char*)m + 40, 480, &s_logSent);
 	if (!n) return;
-	memset(m, 0, DSB_HEAD_SIZE);
+	memset(m, 0, 40);
 	memcpy(m, "DSB1", 4);
-	m[4] = DSB_LOG;
+	m[4] = 9;                           // Log
 	memcpy(m + 5, nbwifiMac(), 6);
-	m[22] = 0xFF; m[23] = 0xFF;
+	m[16] = m[17] = 0xFF;               // RefSeq: none
 	m[38] = (uint8_t)n; m[39] = (uint8_t)(n >> 8);
-	nbwifiUdpSend(s_wmIp, BRIDGE_PORT, BRIDGE_PORT, m, DSB_HEAD_SIZE + n);
+	for (int i = 0; i < WMPEERS_MAX; i++)
+		if (isPc(&s_peers.p[i])) nbwifiUdpSend(s_peers.p[i].ip, s_peers.p[i].port, BRIDGE_PORT, m, 40 + n);
 }
 
 void bridgeTick(uint32_t frames)
 {
+	ensureReady();
 	s_onlineTicks++;
-	if (s_wmIp && s_onlineTicks - s_lastHelloIn > BRIDGE_QUIET_FRAMES) {
-		nbwLogf("[BRIDGE] no word from WideMelon for 15 s: looking for it again\n");
-		s_wmIp = 0;    // (the game's traffic still goes to the old address until it answers)
-	}
-	if (s_wmIp && frames % 30 == 15) bridgeSendLog();
+	if (frames % 30 == 15) bridgeSendLog();
 	if (frames % 60 != 0) return;
-	bridgeSendHello(s_wmIp ? s_wmIp : (nbwifiIp() | ~nbwifiNetmask()));
+	wmpeersExpire(&s_peers, onlineMs());
+	uint8_t hello[WMPEERS_HELLO_LEN];
+	wmpeersHello(&s_peers, hello);
+	nbwifiUdpSend(nbwifiIp() | ~nbwifiNetmask(), BRIDGE_PORT, BRIDGE_PORT, hello, sizeof(hello));
+	for (int i = 0; i < WMPEERS_MAX; i++)
+		if (s_peers.p[i].used) nbwifiUdpSend(s_peers.p[i].ip, s_peers.p[i].port, BRIDGE_PORT, hello, sizeof(hello));
 }

@@ -112,26 +112,30 @@ static bool _ethSend(NetBuf* nb)
 
 // ---- ARP: a few known addresses ----
 
+// (8: the router, and up to 7 other consoles playing local wireless with us over WiFi, which
+// send many times a second and so stay; with 4, one found by another's packets crowded a
+// partner out, and our next packets to it went while it was asked for again)
+#define ARP_SLOTS 8
 typedef struct { u32 ip; u8 mac[6]; u16 age; } ArpEntry;
-static ArpEntry s_arp[4];
+static ArpEntry s_arp[ARP_SLOTS];
 
 static void _arpLearn(u32 ip, const u8* mac)
 {
 	if (!ip || ip == 0xffffffff) return;
 	ArpEntry* slot = &s_arp[0];
-	for (unsigned i = 0; i < 4; i++) {
+	for (unsigned i = 0; i < ARP_SLOTS; i++) {
 		if (s_arp[i].ip == ip) { slot = &s_arp[i]; break; }
 		if (s_arp[i].age > slot->age) slot = &s_arp[i];
 	}
 	slot->ip = ip;
 	memcpy(slot->mac, mac, 6);
 	slot->age = 0;
-	for (unsigned i = 0; i < 4; i++) if (&s_arp[i] != slot && s_arp[i].age < 0xffff) s_arp[i].age++;
+	for (unsigned i = 0; i < ARP_SLOTS; i++) if (&s_arp[i] != slot && s_arp[i].age < 0xffff) s_arp[i].age++;
 }
 
 static const u8* _arpFind(u32 ip)
 {
-	for (unsigned i = 0; i < 4; i++) if (s_arp[i].ip == ip) return s_arp[i].mac;
+	for (unsigned i = 0; i < ARP_SLOTS; i++) if (s_arp[i].ip == ip) return s_arp[i].mac;
 	return NULL;
 }
 
