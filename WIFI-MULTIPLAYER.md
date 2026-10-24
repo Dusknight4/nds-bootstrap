@@ -1,16 +1,21 @@
 # Local wireless over WiFi with WideMelon
 
-This build of nds-bootstrap (**v2.17.3**, based on the official v2.17.0)
+This build of nds-bootstrap (**v2.17.4**, based on the official v2.17.0)
 lets a DS game's **local wireless** (DS-to-DS play) run over your WiFi network
-instead, so a real console can play with
-**[WideMelon](https://github.com/Dusknight4/widemelon/releases/tag/v1.0.4-mod.5)**
-on a PC: a DS emulator with the matching multiplayer support. That is the only
-reason this build exists; without WideMelon (and without the
+instead, so real consoles can play with each other and with
+**[MultiMelon](https://github.com/Dusknight4/widemelon/releases)** on a PC: a
+DS emulator with the matching multiplayer support. That is the only reason
+this build exists; without it (and without the
 [R4 save copy](R4-SAVE-COPY.md)) it's the same as nds-bootstrap v2.17.0.
 
-Both just connect to the same WiFi network. In Pokémon Platinum and HeartGold
-(US) the Union Room, trades and battles work in both directions, whichever side
-starts the talk, including Platinum with HeartGold. Other games are untested.
+Everyone just connects to the same WiFi network: consoles and MultiMelons all
+hear each other, as DS systems in the same room do, up to four players (as
+many as the game allows: the Platinum Underground takes eight). In Pokémon
+Platinum and HeartGold (US) the Union Room, trades and battles work between
+any of them, whoever starts the talk, including Platinum with HeartGold; the
+Link Pokéathlon and the Underground work with four. A player whose WiFi drops
+out for a few seconds carries on where they left off, as on the DS. Other
+games are untested.
 
 ## What you need
 
@@ -24,9 +29,9 @@ starts the talk, including Platinum with HeartGold. Other games are untested.
     passes these networks to DS games in DSi mode; nothing else to enter.
   - **DSi:** System Settings > Internet > Connection Settings > Advanced Setup
     (connections 4 to 6 take WPA/WPA2).
-- A PC on the **same network** running
-  [WideMelon 1.0.4-mod.5 or later](https://github.com/Dusknight4/widemelon/releases/tag/v1.0.4-mod.5).
-  Networks that keep devices apart ("client isolation", common on guest and
+- To play with a PC: a PC on the **same network** running
+  [MultiMelon](https://github.com/Dusknight4/widemelon/releases) (consoles
+  also play with each other without one). Networks that keep devices apart ("client isolation", common on guest and
   some public WiFi) won't work.
 
 ## Installing
@@ -50,14 +55,14 @@ starts the talk, including Platinum with HeartGold. Other games are untested.
    Up/Down and press **A**: **Local as WiFi**, or **Regular Local** (the
    game's own wireless, with real DS systems nearby). The choice is kept for
    next time, in `_nds/nds-bootstrap-wifi.ini`.
-2. In WideMelon, turn on **System > Multiplayer > Connect a real DS (WiFi
-   bridge)** (it's remembered). WideMelon listens on **UDP port 7071**; when
-   Windows asks, allow WideMelon through the firewall for the kind of network
+2. In MultiMelon, turn on **System > Multiplayer > Wifi as Local
+   Multiplayer** (it's remembered). MultiMelon listens on **UDP port 7071**;
+   when Windows asks, allow it through the firewall for the kind of network
    you're on.
-3. Start the game on both and go into the Union Room (or the game's local
-   wireless mode) as you would with two DS systems.
+3. Start the game on each and go into the Union Room (or the game's local
+   wireless mode) as you would with DS systems side by side.
 
-The console joins your WiFi as the game starts and finds WideMelon by itself.
+The console joins your WiFi as the game starts and finds the others by itself.
 Its WiFi rests while the game isn't using its wireless and comes back when you
 enter a wireless area.
 
@@ -76,22 +81,24 @@ BRIDGE=1
 
 - Make sure both are on the same network, and that the console's saved
   connection works (the 3DS's connection test).
-- In WideMelon's folder, `WideMelon bridge log.txt` shows what WideMelon sees,
-  including lines starting with `[DS]`: the console's own log (which network it
-  joined, its IP address, when it found WideMelon). No `[DS]` lines at all
+- In MultiMelon's folder, `WideMelon bridge log.txt` shows what MultiMelon
+  sees, including lines starting with `[DS ...]`: each console's own log (which
+  network it joined, its IP address, whom it found). No `[DS ...]` lines at all
   usually means the firewall is blocking UDP port 7071, or the network keeps
   devices apart.
-- The console finds WideMelon by a broadcast on the network; networks that
-  block broadcasts between devices won't work yet.
+- The consoles and MultiMelons find each other by a broadcast on the network;
+  networks that block broadcasts between devices won't work yet.
 
 ## Known limits
 
-- One console with one WideMelon.
-- When WideMelon hosts the talk (the console started it) on a slow or busy
-  network, WideMelon's frame rate drops while they're linked.
-- Pokémon HeartGold/SoulSilver on WideMelon need WideMelon 1.0.4-mod.5 or
-  later (an earlier WideMelon shows a blue error screen after cancelling a
-  link trade or battle).
+- Pokémon HeartGold/SoulSilver on the PC need WideMelon 1.0.4-mod.5 or later
+  (an earlier one shows a blue error screen after cancelling a link trade or
+  battle).
+- Every console needs this version (v2.17.4) to play with more than one other
+  player.
+- Playing with more than one other player needs a MultiMelon with four-player
+  support on each PC; an older WideMelon or MultiMelon plays with one console
+  only.
 
 ## How it works, and building it
 
