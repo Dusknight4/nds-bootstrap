@@ -11,8 +11,12 @@ bash ../build.sh > /dev/null
 mkdir -p out
 CFLAGS="-O2 -Wall -mcpu=arm7tdmi -mthumb -mthumb-interwork -ffunction-sections -fdata-sections -I../src -I../wmhle -DWMHLE_MAX_CHILD=7 -DWMHLE_MAX_PARENTS=4"
 arm-none-eabi-gcc $CFLAGS -c blob.c -o out/blob.o
-for f in blob_wm.c blob_radio.c blob_bridge.c ../wmhle/wmhle.c ../wmhle/wmhle_air.c ../wmhle/wmpeers.c; do
+for f in blob_wm.c blob_radio.c blob_bridge.c ../wmhle/wmhle.c; do
     arm-none-eabi-gcc $CFLAGS -c $f -o out/$(basename ${f%.c}).o
+done
+# (the 802.11 frames and the peer table: a few calls a frame, built for size; the slot is nearly full)
+for f in ../wmhle/wmhle_air.c ../wmhle/wmpeers.c; do
+    arm-none-eabi-gcc $CFLAGS -Os -c $f -o out/$(basename ${f%.c}).o
 done
 arm-none-eabi-gcc -mcpu=arm7tdmi -c frame_stack.s -o out/frame_stack.o
 arm-none-eabi-gcc -mcpu=arm7tdmi -mthumb -mthumb-interwork -nostartfiles -T blob.ld -Wl,--gc-sections \

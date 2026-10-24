@@ -133,10 +133,14 @@ enum { ST_READY = 0, ST_STOP = 1, ST_IDLE = 2, ST_CLASS1 = 3, ST_SCAN = 5, ST_CO
 #define MAX_PARENTS WMHLE_MAX_PARENTS
 #define PARENT_HEARD_FRAMES 60      // a scan finds a parent heard this lately
 #define PARENT_KEEP_FRAMES 300      // and forgets one not heard this long
-// (as the parent) a child we've had nothing from this long is gone (out of range, switched
-// off): out of the link, as the real ARM7 does once its lifetime runs out, so it doesn't hold
-// up every other child's rounds
-#define CHILD_SILENT_FRAMES 240
+// A link partner we've had nothing from for the game's MP lifetime (WM_SetLifeTime, in 100 ms;
+// Pokemon sets 10 s) is gone (out of range, switched off): out of the link, as the real ARM7's
+// AUTO_DISCONNECT. Until then the link holds, as on the air, where a console a little out of
+// range (a crowded bus) misses its turns and comes back. Before the game sets one: this.
+#define LIFETIME_DEFAULT_FRAMES 240
+// (the child) the parent unheard this long: the "beacon lost" notice (the game takes no action
+// on it), the link still up
+#define BEACON_LOST_FRAMES 120
 
 typedef struct {
 	u16 len;
@@ -188,6 +192,7 @@ static struct {
 	bool connecting;
 	u32 connectStart;
 	u32 lastFromParent;
+	u32 lastCmdFromParent;      // (child) the parent's last CMD to us, or the join (its MP lifetime counts from it)
 	u32 lastCmdFrame;           // (log) the frame we last took a CMD (child)
 	// MP
 	SendPacket sendq[SEND_QUEUE];
@@ -195,6 +200,9 @@ static struct {
 	u16 lastRecvSeq[MAX_CHILD + 1][16];    // per sender aid, per port: duplicates are dropped
 	u32 childHeardAt[MAX_CHILD + 1];       // (parent) the frame we last had a reply from each child
 	u16 childPolls[MAX_CHILD + 1];         // (parent) CMDs sent it since (a child never polled isn't silent)
+	u8 childMissed[MAX_CHILD + 1];         // (parent) rounds in a row that closed without its reply
+	u32 lifeFrames;             // the MP lifetime in frames (0: none, the game turned it off)
+	bool beaconLostSent;        // (child) the notice for this silence of the parent's sent
 	u16 cmdSeq;                 // 802.11 sequence of our frames
 	u16 lastCmdSeq;             // child: the parent's last CMD (for our reply's RefSeq)
 	u16 ackCounter;
@@ -828,6 +836,7 @@ static void runRequest(u32 req)
 			W.cbOut = W.cbIn;
 			wr16(CALLBACK_CONTROL, (u16)(rd16(CALLBACK_CONTROL) & ~1));
 			rqReset();
+			W.lifeFrames = LIFETIME_DEFAULT_FRAMES;
 			commonInit(arg(req, 4));
 			setState(apiid == API_INITIALIZE ? ST_IDLE : ST_STOP);
 			logNum("wmhle: initialize, status/fifo", W.status, W.fifo7to9);
@@ -872,7 +881,14 @@ static void runRequest(u32 req)
 		case API_SET_ENTRY:      sset16(S_pparam + PP_entryFlag, (u16)arg(req, 1)); reply(apiid, ERR_SUCCESS); break;
 		case API_SET_BEACON_PERIOD: sset16(S_pparam + PP_beaconPeriod, (u16)arg(req, 1)); reply(apiid, ERR_SUCCESS); break;
 		case API_SET_PS_MODE:    sset16(S_pwrMgtMode, (u16)arg(req, 1)); reply(apiid, ERR_SUCCESS); break;
-		case API_SET_LIFETIME:
+		case API_SET_LIFETIME: {
+			// tableNumber, camLifeTime, frameLifeTime, mpLifeTime (100 ms; 0xFFFF: none)
+			const u16 mp = (u16)arg(req, 4);
+			W.lifeFrames = mp == 0xFFFF ? 0 : mp ? (u32)mp * 6 : LIFETIME_DEFAULT_FRAMES;
+			logNum("wmhle: lifetime: MP (100 ms), frames", mp, W.lifeFrames);
+			reply(apiid, ERR_SUCCESS);
+			break;
+		}
 		case API_SET_WEPKEY:
 		case API_SET_WEPKEY_EX:
 		case API_INIT_W_COUNTER:
@@ -986,6 +1002,7 @@ static void onJoin(const BridgeMsg* m)
 	W.childReplied[aid] = false;
 	W.childHeardAt[aid] = W.frames;
 	W.childPolls[aid] = 0;
+	W.childMissed[aid] = 0;
 	sset16(S_linkLevel, 3);     // (the signal icon: full, while linked)
 	for (int p = 0; p < 16; p++) W.lastRecvSeq[aid][p] = 0xFFFF;
 	u8 body[64];
@@ -1222,6 +1239,7 @@ static void rqTake(void)
 #define ROUND_WAIT_US 0      // no waiting in the VBlank IRQ (the ARM7 held the main RAM bus: graphics glitches);
                              // the reply closes the round from the next poll (VBlank or the mid-frame timer)
 #define ROUND_MAX_FRAMES 3     // a round waits this many frames at most for its replies
+#define LAGGING_ROUNDS 3       // a child whose replies missed this many rounds in a row isn't waited for
 
 static bool childHasQueuedReply(u16 aid)
 {
@@ -1239,9 +1257,25 @@ static void leavePendingTick(void)
 		if ((s_leavePending & (1 << a)) && (!childHasQueuedReply(a) || W.frames - s_leaveAt[a] > 30)) childLeaveNow(a);
 }
 
+// the children the open round waits for: all of them, except, while another keeps up, any whose
+// replies missed the last LAGGING_ROUNDS rounds. As on the air, where the parent's round never
+// waits and a child in a bad spot only misses its turn, one child lagging (a weak WiFi signal, a
+// busy PC) doesn't slow the others' rounds to its pace; its replies, when they come, go in the next
+// round (rqTake), and the first one in time has it waited for again. A lone child, or all of them
+// lagging, is still waited for: closing the rounds without it had the child send again round after
+// round (see parentMpRound).
+static u16 roundWaitsFor(void)
+{
+	u16 keeping = 0;
+	for (u16 a = 1; a <= MAX_CHILD; a++)
+		if (((s_round.children >> a) & 1) && W.childMissed[a] < LAGGING_ROUNDS) keeping |= (u16)(1 << a);
+	return keeping ? keeping : s_round.children;
+}
+
 static bool roundRepliesIn(void)
 {
-	for (u16 a = 1; a <= MAX_CHILD; a++) if ((s_round.children >> a) & 1 && !s_replyIn[a]) return false;
+	const u16 waits = roundWaitsFor();
+	for (u16 a = 1; a <= MAX_CHILD; a++) if ((waits >> a) & 1 && !s_replyIn[a]) return false;
 	return true;
 }
 
@@ -1327,6 +1361,8 @@ static void parentMpFinish(void)
 			wr16(d + 6, s_replyIn[a] ? 0 : 1);
 			if (!s_replyIn[a]) missing |= (u16)(1 << a);
 		}
+		if (!s_replyIn[a]) { if (W.childMissed[a] < 0xFF) W.childMissed[a]++; }
+		else W.childMissed[a] = 0;
 		wr16(d + 2, 0);
 		wr16(d + 4, a);
 		count++;
@@ -1394,13 +1430,15 @@ static void parentMpFinish(void)
 	leavePendingTick();     // (a child that left once its last reply was in: now)
 }
 
-// (each frame, MP parent) a child that hasn't answered for CHILD_SILENT_FRAMES while we kept
-// polling it (at least 30 CMDs) is gone: it's told (it may still hear us) and leaves the link
+// (each frame, MP parent) a child that hasn't answered for the MP lifetime while we kept polling
+// it (at least 30 CMDs) is gone: it's told (it may still hear us) and leaves the link. (Its
+// silence meanwhile doesn't slow the others: see roundWaitsFor.)
 static void childSilenceTick(void)
 {
+	if (!W.lifeFrames) return;
 	for (u16 a = 1; a <= MAX_CHILD; a++) {
 		if (!(sget16(S_child_bitmap) & (1 << a))) continue;
-		if (W.frames - W.childHeardAt[a] <= CHILD_SILENT_FRAMES || W.childPolls[a] < 30) continue;
+		if (W.frames - W.childHeardAt[a] <= W.lifeFrames || W.childPolls[a] < 30) continue;
 		logNum("wmhle: a child stopped answering: aid, CMDs unanswered", a, W.childPolls[a]);
 		sendLeaveTo(a);
 		s_leavePending &= (u16)~(1 << a);
@@ -1494,7 +1532,7 @@ static void onCmd(const BridgeMsg* m)
 {
 	if (state() != ST_MP_CHILD && state() != ST_CHILD) return;
 	if (memcmp(m->mac, W.remoteMac, 6) != 0) return;
-	W.lastFromParent = W.frames;
+	W.lastFromParent = W.lastCmdFromParent = W.frames;
 	if (state() != ST_MP_CHILD || m->bodyLen < 4) return;
 	// the CMD we just answered, again (WideMelon sends each twice, a lost one being its
 	// data lost for good; a host also resends one it got no reply to): the same reply
@@ -1645,7 +1683,7 @@ static void onJoinOk(const BridgeMsg* m)
 	u16 aid = 0;
 	if (!airParseAssocResp(m->body, m->bodyLen, &aid) || !aid) return;
 	W.connecting = false;
-	W.lastFromParent = W.frames;
+	W.lastFromParent = W.lastCmdFromParent = W.frames;
 	sset16(S_aid, aid);
 	sset16(S_linkLevel, 3);
 	setState(ST_CHILD);
@@ -1661,6 +1699,26 @@ static void onJoinOk(const BridgeMsg* m)
 	put16(c + 0x16, parentSize);
 	put16(c + 0x18, childSize);
 	logNum("wmhle: joined, aid / parent,child size", aid, (u32)parentSize << 16 | childSize);
+}
+
+// (each frame, a child) the parent unheard: after a little the "beacon lost" notice, as the real
+// ARM7 gives (the game takes no action on it), the link still up, so it carries on when the parent
+// is heard again; with no CMD from it for the MP lifetime (its beacons alone don't keep the link:
+// a parent that let us go sends none) the link ends. (Ending it after two seconds, with the game
+// still taking itself to be linked, as before, turned every short dropout into a lost link.)
+static void parentSilenceTick(void)
+{
+	const u32 noCmd = W.frames - W.lastCmdFromParent;
+	if (W.lifeFrames && noCmd > (W.lifeFrames > BEACON_LOST_FRAMES ? W.lifeFrames : BEACON_LOST_FRAMES)) { childLost(SC_DISCONNECTED); return; }
+	const u32 quiet = W.frames - W.lastFromParent;
+	if (quiet <= BEACON_LOST_FRAMES) { W.beaconLostSent = false; return; }
+	if (W.beaconLostSent) return;
+	W.beaconLostSent = true;
+	logNum("wmhle: the parent unheard (frames), link kept for (frames)", quiet, W.lifeFrames);
+	u8* c = newCallback(API_START_CONNECT, ERR_SUCCESS, 0x1A);
+	put16(c + 8, SC_BEACON_LOST);
+	put16(c + 0x0A, sget16(S_aid));
+	memcpy(c + 0x10, W.remoteMac, 6);
 }
 
 static void childLost(u16 reasonCode)
@@ -1735,7 +1793,7 @@ void wmhleFrame(void)
 		if (st == ST_MP_PARENT) parentMpRound();
 		if (st == ST_PARENT || st == ST_MP_PARENT) leavePendingTick();
 		if (st == ST_CHILD || st == ST_MP_CHILD) childHeldTick();
-		if ((st == ST_CHILD || st == ST_MP_CHILD) && W.frames - W.lastFromParent > 120) childLost(SC_BEACON_LOST);
+		if (st == ST_CHILD || st == ST_MP_CHILD) parentSilenceTick();
 		if (st == ST_MP_CHILD && W.waitingAck && W.frames - W.waitingAckFrame >= 2) childAckTimeout();
 		for (int i = 0; i < MAX_PARENTS; i++)
 			if (s_parents[i].used && W.frames - s_parents[i].heardAt > PARENT_KEEP_FRAMES) s_parents[i].used = false;
